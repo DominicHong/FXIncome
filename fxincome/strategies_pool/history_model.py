@@ -293,7 +293,7 @@ def main():
     # )
 
     start_date = datetime.date(2022, 1, 1)
-    end_date = datetime.date(2024, 5, 30)
+    end_date = datetime.date(2024, 10, 18)
     dates_to_predict = [
         start_date + datetime.timedelta(days=x)
         for x in range((end_date - start_date).days + 1)

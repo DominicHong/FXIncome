@@ -14,6 +14,7 @@ from sklearn.metrics import (
 )
 from dataclasses import dataclass
 from fxincome import logger, handler, const
+from sqlalchemy import create_engine
 
 
 class ETFData(bt.feeds.PandasData):
@@ -509,10 +510,18 @@ def read_predictions_prices(
         parse_dates=["date"],
     )
     bond_pred["date"] = bond_pred["date"].dt.date
-    etf_price = pd.read_csv(
-        os.path.join(const.PATH.STRATEGY_POOL, "511260.sh.csv"),
-        parse_dates=["date"],
-    )
+    # etf_price = pd.read_csv(
+    #     os.path.join(const.PATH.STRATEGY_POOL, "511260.sh.csv"),
+    #     parse_dates=["date"],
+    # )
+    connection_string = (f'mysql+mysqlconnector://{const.MYSQL_CONFIG.USER}:{const.MYSQL_CONFIG.PASSWORD}'
+                         f'@{const.MYSQL_CONFIG.HOST}/{const.MYSQL_CONFIG.DATABASE}')
+    engine=create_engine(connection_string)
+    etf_query = f"SELECT * FROM {const.PATH.STRATEGY_POOL.replace(const.PATH.MAIN, '').replace('/', '')}_511260sh"
+    etf_price = pd.read_sql(etf_query, engine)
+    engine.dispose()
+
+
     etf_price["date"] = etf_price["date"].dt.date
     # Filter prices between start_date and end_date
     etf_price = etf_price[
@@ -585,8 +594,8 @@ def analyze_prediction(
 
 
 def main():
-    start_date = datetime.date(2022, 1, 1)
-    end_date = datetime.date(2024, 5, 30)
+    start_date = datetime.date(2024, 1, 1)
+    end_date = datetime.date(2024, 10, 18)
     run_backtest(
         strat=TradeEverydayStrategy,
         start_date=start_date,

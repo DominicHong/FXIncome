@@ -5,6 +5,7 @@ import scipy
 import datetime
 from pandas import DataFrame
 from fxincome import const, logger
+from sqlalchemy import create_engine
 
 
 def feature_engineering(
@@ -179,10 +180,16 @@ def read_processed_data_from_csv(distance_type: str):
 
 
 def main():
-    data = pd.read_csv(
-        os.path.join(const.PATH.STRATEGY_POOL, const.HistorySimilarity.SRC_NAME),
-        parse_dates=["date"],
-    )
+    # data = pd.read_csv(
+    #     os.path.join(const.PATH.STRATEGY_POOL, const.HistorySimilarity.SRC_NAME),
+    #     parse_dates=["date"],
+    # )
+    connection_string = (f'mysql+mysqlconnector://{const.MYSQL_CONFIG.USER}:{const.MYSQL_CONFIG.PASSWORD}'
+                         f'@{const.MYSQL_CONFIG.HOST}/{const.MYSQL_CONFIG.DATABASE}')
+    engine=create_engine(connection_string)
+    data_query = f"SELECT * FROM {const.PATH.STRATEGY_POOL.replace(const.PATH.MAIN, '').replace('/', '')}_{const.HistorySimilarity.SRC_NAME.replace('.csv', '')}"
+    data=pd.read_sql(data_query,engine)
+    engine.dispose()
     data = feature_engineering(
         df=data,
         yield_pctl_window=const.HistorySimilarity.PARAMS["YIELD_PCTL_WINDOW"],
