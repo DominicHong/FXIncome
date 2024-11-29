@@ -205,11 +205,11 @@ class NTraderStrategy(bt.Strategy):
         if order.status in [order.Completed]:
             if order.isbuy():
                 self.log(
-                    f"Order {order.ref}, BUY, {order.executed.price:.2f}, {order.executed.size:.2f}, Cash after: {self.broker.get_cash():.2f}"
+                    f"Order {order.ref}, BUY, {order.executed.price:.4f}, {order.executed.size:.2f}, Cash after: {self.broker.get_cash():.2f}"
                 )
             elif order.issell():
                 self.log(
-                    f"Order {order.ref}, SELL, {order.executed.price:.2f}, {order.executed.size:.2f}, Cash after: {self.broker.get_cash():.2f}"
+                    f"Order {order.ref}, SELL, {order.executed.price:.4f}, {order.executed.size:.2f}, Cash after: {self.broker.get_cash():.2f}"
                 )
         elif order.status in [
             order.Canceled,
@@ -230,16 +230,17 @@ class NTraderStrategy(bt.Strategy):
     def next(self):
         today = self.etf_data.datetime.date(0)
         # Do nothing on the final day.
-        if len(self.etf_data) == self.etf_data.buflen():
-            return
+        # if len(self.etf_data) == self.etf_data.buflen():
+        #     return
 
         for trader in self.traders:
-            interest = trader.reverse_repo(
-                rate=self.etf_data.gc001[0] / 100,
-                start_date=today,
-                end_date=self.etf_data.datetime.date(1),
-            )
-            self.broker.add_cash(interest)
+            if len(self.etf_data) < self.etf_data.buflen():
+                interest = trader.reverse_repo(
+                    rate=self.etf_data.gc001[0] / 100,
+                    start_date=today,
+                    end_date=self.etf_data.datetime.date(1),
+                )
+                self.broker.add_cash(interest)
             # Only on the judgement_day we decide whether to trade.
             if trader.judgement_day != today:
                 continue
@@ -247,7 +248,7 @@ class NTraderStrategy(bt.Strategy):
             if len(self.etf_data) + self.p.pred_days <= self.etf_data.buflen():
                 trader.judgement_day = self.etf_data.datetime.date(self.p.pred_days)
             else:
-                continue
+                pass
 
             # Trade based on the predictions
             preds = self.p.pred_df[self.p.pred_df["date"].dt.date == today]
@@ -258,10 +259,15 @@ class NTraderStrategy(bt.Strategy):
             else:
                 # prediction of change of ytm after next pred_days trade days.
                 pred_weight = preds[f"pred_weight_{self.p.pred_days}"].iat[0]
-            if pred_weight <= 0:  # ytm down, buy
-                buy_size = trader.buy(
-                    price=self.etf_data.open[1], sizer=self.p.sizer, pred_w=pred_weight
-                )
+            if pred_weight <= 0:
+                if len(self.etf_data) == self.etf_data.buflen():# ytm down, buy
+                    buy_size = trader.buy(
+                        price=self.etf_data.close[0], sizer=self.p.sizer, pred_w=pred_weight
+                    )
+                else:
+                    buy_size = trader.buy(
+                        price=self.etf_data.open[1], sizer=self.p.sizer, pred_w=pred_weight
+                    )
                 self.order = self.buy(
                     data=self.etf_data,
                     size=buy_size,  # buy at t+1's open price
@@ -269,10 +275,15 @@ class NTraderStrategy(bt.Strategy):
                     exectype=bt.Order.Market,  # buy at t+1's open price
                     valid=None,
                 )
-            elif pred_weight > 0:  # ytm up, sell
-                sell_size = trader.sell(
-                    price=self.etf_data.open[1], sizer=self.p.sizer, pred_w=pred_weight
-                )
+            elif pred_weight > 0:
+                if len(self.etf_data) == self.etf_data.buflen():## ytm up, sell
+                    sell_size = trader.sell(
+                        price=self.etf_data.close[0], sizer=self.p.sizer, pred_w=pred_weight
+                    )
+                else:
+                    sell_size = trader.sell(
+                        price=self.etf_data.open[1], sizer=self.p.sizer, pred_w=pred_weight
+                    )
                 self.order = self.sell(
                     data=self.etf_data,
                     size=sell_size,  # sell at t+1's open price
@@ -283,6 +294,13 @@ class NTraderStrategy(bt.Strategy):
             else:
                 logger.info(f"The prediction weight is NOT a number")
                 continue
+            if len(self.etf_data) == self.etf_data.buflen():
+                if self.order is not None:
+                    self.log(
+                        f"Order {self.order.ref} TOMORROW:{'BUY' if self.order.isbuy() else 'SELL'}, Size: {self.order.size:.2f} pred_weight：{pred_weight:.2f}"
+                    )
+                else:
+                    self.log(f"No order tomorrow  pred_weight：{pred_weight:.2f}")
 
 
 class TradeEverydayStrategy(bt.Strategy):
@@ -425,6 +443,8 @@ def run_backtest(
     end_date: datetime.date,
     num_traders: int,
     pred_days: int,
+    pred_table: str = None,
+    etf_table: str = None,
     sizer: str = "all",
     tp_pct: float = 0.0015,  # ytm change of 1bp = value change of 8.8bp for a 10-year bond
     sl_pct: float = -0.0008,  # ytm change of 1bp = value change of 8.8bp for a 10-year bond
@@ -432,7 +452,9 @@ def run_backtest(
     / 100,  # Commission rate for reverse repo. 0.01 -> 1%
     bond_commission: float = 0.0002,  # commission for bond trade. 0.0002 -> 0.02%
 ):
-    bond_pred, etf_price = read_predictions_prices(start_date, end_date, asset_code)
+    bond_pred, etf_price = read_predictions_prices(start_date, end_date, asset_code,pred_table,etf_table)
+
+
 
     # Create a cerebro entity
     cerebro = bt.Cerebro(tradehistory=True)
@@ -523,17 +545,19 @@ def run_backtest(
 
 
 def read_predictions_prices(
-    start_date: datetime.date, end_date: datetime.date, asset_code: str
+    start_date: datetime.date, end_date: datetime.date, asset_code: str,pred_table:str=None,etf_table:str=None
 ) -> tuple:
     conn = sqlite3.connect(const.DB.SQLITE_CONN)
     # predictions of Ytm direction
-    pred_table = const.DB.HistorySimilarity_TABLES["PREDICTIONS"]
+    if pred_table is None:
+        pred_table = const.DB.HistorySimilarity_TABLES["PREDICTIONS"]
     bond_pred = pd.read_sql(
         f"SELECT * FROM [{pred_table}]", conn, parse_dates=["date"]
     )
     bond_pred["date"] = bond_pred["date"].dt.date
 
-    etf_table = const.DB.HistorySimilarity_TABLES["RAW_BACKTEST"]
+    if etf_table is None:
+        etf_table = const.DB.HistorySimilarity_TABLES["RAW_BACKTEST"]
     db_query = (
         f"SELECT * FROM [{etf_table}] WHERE asset_code='{asset_code}'"
     )
@@ -559,7 +583,7 @@ def read_predictions_prices(
 def analyze_prediction(
     start_date: datetime.date, end_date: datetime.date, pred_days: int, asset_code:str
 ):
-    bond_pred, etf_price = read_predictions_prices(start_date, end_date, asset_code)
+    bond_pred, etf_price = read_predictions_prices(start_date, end_date, asset_code,None,None)
 
     conn = sqlite3.connect(const.DB.SQLITE_CONN)
     feats_labels_table = const.DB.HistorySimilarity_TABLES["FEATS_LABELS"]

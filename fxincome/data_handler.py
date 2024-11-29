@@ -26,7 +26,7 @@ def update_strat_hist_simi_raw_featrues(conn):
         index=["date", "t_1y", "t_10y", "t_us_1y", "t_us_10y", "hs300"],
     )
     df = df.T
-    df[1:].to_sql(db_table, conn, if_exists="append", index=False)
+    df[df['date']>datetime.strptime(begin,'%Y-%m-%d').date()].to_sql(db_table, conn, if_exists="append", index=False)
 
 
 def update_strat_hist_simi_raw_backtest(asset_code: str, conn):
@@ -84,7 +84,7 @@ def update_strat_hist_simi_raw_backtest(asset_code: str, conn):
     )
     df2 = df2.T
     df = pd.merge(df1, df2, on="date")
-    df[1:].to_sql(
+    df[df['date']>datetime.strptime(latest_date,'%Y-%m-%d').date()].to_sql(
         db_table, conn, if_exists="append", index=False
     )
 
@@ -95,6 +95,9 @@ def main():
 
     update_strat_hist_simi_raw_featrues(conn)
     asset_code = "511260.SH"
+    update_strat_hist_simi_raw_backtest(asset_code, conn)
+
+    asset_code = "240004.IB"
     update_strat_hist_simi_raw_backtest(asset_code, conn)
 
     w.close()

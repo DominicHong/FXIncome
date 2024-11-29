@@ -12,8 +12,8 @@ class DB:
     HistorySimilarity_TABLES = {
         "RAW_FEATURES": "strat.hist_simi.raw_features",
         "RAW_BACKTEST": "strat.hist_simi.raw_backtest",
-        "FEATS_LABELS": "strat.hist_simi.feats_labels",
-        "PREDICTIONS": "strat.hist_simi.predictions",
+        "FEATS_LABELS": "strat.hist_simi.temp.feats_labels",
+        "PREDICTIONS": "strat.hist_simi.temp.predictions",
     }
 
 
