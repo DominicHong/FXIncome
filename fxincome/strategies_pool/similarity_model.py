@@ -112,7 +112,6 @@ def avg_yield_chg(
 
     # Find the column with the same date as the given date
     close_rows = simi_matrix_with_yield_chg[["date", given_date, yield_chg_fwd]]
-    # Find rows with distance in the specified range
     close_rows = close_rows[
         (close_rows[given_date] >= distance_min)
         & (close_rows[given_date] < distance_max)
@@ -121,7 +120,7 @@ def avg_yield_chg(
     if close_rows.empty:
         return np.nan, close_rows
 
-    # Drop dates wheen yield_chg_fwd is unavailable yet.
+    # Drop dates when yield_chg_fwd is unavailable yet.
     close_rows = close_rows.dropna(subset=[yield_chg_fwd])
 
     # Calculate weighted average of yield_chg_fwd, weighted by INVERSE of distance(smaller distance, higher weight)
@@ -237,7 +236,9 @@ def predict_yield_chg(
     """
 
     sample_df = sample_df[["date"] + list(const.HistorySimilarity.LABELS_YIELD_CHG.values())]
+    sample_df=sample_df.sort_values(by="date",ascending=True)
     combined_df = pd.merge(sample_df, similarity_df, left_on="date", right_on="date")
+    combined_df=combined_df.sort_values(by='date',ascending=True)
 
     # Predict only on given dates.
     result_df = sample_df[sample_df["date"].isin(dates_to_pred)].copy()
@@ -249,7 +250,7 @@ def predict_yield_chg(
         similar_dates_with_one_date = pd.DataFrame()
         for day, label_name in const.HistorySimilarity.LABELS_YIELD_CHG.items():
             # Use only past dates to predict the future
-            history_df = combined_df[combined_df["date"] < row["date"]]
+            history_df = combined_df[combined_df["date"] < row["date"]][:-day+1]
 
             yield_chg_avg, close_rows = avg_yield_chg(
                 row["date"],
