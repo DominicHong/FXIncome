@@ -1,3 +1,4 @@
+from vnpy_portfoliostrategy import StrategyEngine
 from fxincome.backtest.index_strategy import IndexStrategy
 
 
@@ -12,16 +13,18 @@ class IndexExtremeStrategy(IndexStrategy):
         2.2 In "expert mode", positions are adjusted based on expert rate signals.
     """
 
-    params = (
-        ("expert_mode", False),  # Whether to use expert signals
-        ("expert_signal", None),  # Expert signal: 0 for rates down, 1 for rates up
+    def __init__(    
+        self,
+        strategy_engine: StrategyEngine,
+        strategy_name: str,
+        vt_symbols: list[str],
+        setting: dict
+    ):
+        super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
+        self.expert_mode = setting.get("expert_mode", False)
         # Additional percentile thresholds for more granular control
-        ("extreme_low_percentile", 10),
-        ("extreme_high_percentile", 90),
-    )
-
-    def __init__(self):
-        super().__init__()
+        self.extreme_low = setting.get("extreme_low_percentile", 0.10)
+        self.extreme_high = setting.get("extreme_high_percentile", 0.90)
         # Lists to track bonds held in each maturity bucket
         self.code_list_3 = []  # Tracks 3-year bonds currently held
         self.code_list_5 = []  # Tracks 5-year bonds currently held
@@ -60,7 +63,7 @@ class IndexExtremeStrategy(IndexStrategy):
             list (float): Adjusted positions in [7yr, 5yr, 3yr]
         """
         # Check expert_signal is valid
-        if self.p.expert_mode:
+        if self.expert_mode:
             if expert_signal is None:
                 raise ValueError(
                     "Expert signal is required when expert mode is enabled"
@@ -68,61 +71,56 @@ class IndexExtremeStrategy(IndexStrategy):
             elif expert_signal not in [0, 1]:
                 raise ValueError("Expert signal must be 0 or 1")
 
-        # Use the class parameters for percentile thresholds
-        low_pctl = self.p.low_percentile / 100
-        high_pctl = self.p.high_percentile / 100
-        extreme_low = self.p.extreme_low_percentile / 100
-        extreme_high = self.p.extreme_high_percentile / 100
-
         # If using expert mode, use expert signal to adjust positions
-        if self.p.expert_mode:
-            if spread_pctl <= low_pctl and expert_signal == 1:
+        if self.expert_mode:
+            if spread_pctl <= self.low_pctl and expert_signal == 1:
                 # Low spread + Rates up expectation, shift to extremely shorter position.
                 positions[y_idx] += 2
                 positions[x_idx] -= 2
-            elif spread_pctl <= low_pctl and expert_signal == 0:
+            elif spread_pctl <= self.low_pctl and expert_signal == 0:
                 # Low spread + Rates down expectation, shift to shorter position.
                 positions[y_idx] += 1
                 positions[x_idx] -= 1
-            elif spread_pctl >= high_pctl and expert_signal == 0:
+            elif spread_pctl >= self.high_pctl and expert_signal == 0:
                 # High spread + Rates down expectation, shift to extremely longer position.
                 positions[x_idx] += 2
                 positions[y_idx] -= 2
-            elif spread_pctl >= high_pctl and expert_signal == 1:
+            elif spread_pctl >= self.high_pctl and expert_signal == 1:
                 # High spread + Rates up expectation, shift to longer position.
                 positions[x_idx] += 1
                 positions[y_idx] -= 1
         # If not using expert mode, use four-tier percentile thresholds
         else:
-            if spread_pctl <= extreme_low:
+            if spread_pctl <= self.extreme_low:
                 positions[y_idx] += 2
                 positions[x_idx] -= 2
-            elif extreme_low < spread_pctl <= low_pctl:
+            elif self.extreme_low < spread_pctl <= self.low_pctl:
                 positions[y_idx] += 1
                 positions[x_idx] -= 1
-            elif high_pctl <= spread_pctl < extreme_high:
+            elif self.high_pctl <= spread_pctl < self.extreme_high:
                 positions[x_idx] += 1
                 positions[y_idx] -= 1
-            elif extreme_high <= spread_pctl:
+            elif self.extreme_high <= spread_pctl:
                 positions[x_idx] += 2
                 positions[y_idx] -= 2
 
+        
         # Ensure all positions are non-negative
         positions = [max(0, p) for p in positions]
 
-        # If total position exceeds target_sum(normally 6 units), scale proportionally
-        target_sum = 6
+        # Adjust positions so that total position is TOTAL_POS.
+        # If total position exceeds TOTAL_POS(normally 6 units), scale proportionally
         total = sum(positions)
-        if total > target_sum:
-            positions = [p * target_sum / total for p in positions]
+        if total > self.TOTAL_POS:
+            positions = [p * self.TOTAL_POS / total for p in positions]
 
         # Round positions to 1 decimal place
         positions = [round(p, 1) for p in positions]
 
-        # Ensure total equals exactly target_sum (6.0) with a single adjustment
+        # Ensure total equals exactly TOTAL_POS (6.0) with a single adjustment
         total = sum(positions)
-        if total != target_sum:
-            diff = target_sum - total
+        if total != self.TOTAL_POS:
+            diff = self.TOTAL_POS - total
             if diff > 0:
                 # Find the smallest position and add the remaining amount
                 min_idx = positions.index(min(positions))
@@ -134,14 +132,14 @@ class IndexExtremeStrategy(IndexStrategy):
                     positions[max_idx] + diff, 1
                 )  # diff is negative
 
-        if sum(positions) != target_sum:
+        if sum(positions) != self.TOTAL_POS:
             raise ValueError(
-                f"Total position sum is not equal to target_sum: {sum(positions)} != {target_sum}"
+                f"Total position sum is not equal to TOTAL_POS: {sum(positions)} != {self.TOTAL_POS}"
             )
         return positions
 
     def _generate_target_positions(
-        self, spread_53, spread_75, spread_73
+        self, spread_53, spread_75, spread_73, expert_signal=None
     ) -> list[float]:
         """
         Calculate the final positions based on all three spreads.
@@ -150,27 +148,28 @@ class IndexExtremeStrategy(IndexStrategy):
             spread_53 (float): 5yr-3yr spread percentile
             spread_75 (float): 7yr-5yr spread percentile
             spread_73 (float): 7yr-3yr spread percentile
+            expert_signal (int, optional): Expert signal, 0 for rates down, 1 for rates up
 
         Returns:
             list (float): Final positions [7yr, 5yr, 3yr]
         """
         # Initial positions: [7yr, 5yr, 3yr] 2 units each
-        positions = [2, 2, 2]
+        positions = [self.TOTAL_POS / 3, self.TOTAL_POS / 3, self.TOTAL_POS / 3]
 
         # Apply adjustments in sequence
         # For 5yr-3yr spread: x_idx=1 (5yr), y_idx=2 (3yr)
         positions = self._adjust_position(
-            spread_53, positions, 1, 2, self.p.expert_signal
+            spread_53, positions, 1, 2, expert_signal
         )
 
         # For 7yr-5yr spread: x_idx=0 (7yr), y_idx=1 (5yr)
         positions = self._adjust_position(
-            spread_75, positions, 0, 1, self.p.expert_signal
+            spread_75, positions, 0, 1, expert_signal
         )
 
         # For 7yr-3yr spread: x_idx=0 (7yr), y_idx=2 (3yr)
         positions = self._adjust_position(
-            spread_73, positions, 0, 2, self.p.expert_signal
+            spread_73, positions, 0, 2, expert_signal
         )
 
         return positions
