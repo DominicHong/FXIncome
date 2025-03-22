@@ -1,4 +1,5 @@
 from vnpy_portfoliostrategy import StrategyEngine
+from vnpy.trader.object import BarData
 from fxincome.backtest.index_strategy import IndexStrategy
 
 
@@ -174,6 +175,27 @@ class IndexExtremeStrategy(IndexStrategy):
 
         return positions
 
+    
+    def on_init(self) -> None:
+        self.write_log("回测初始化")
+        self.load_bars(1)
+
+    def on_start(self) -> None:
+        self.write_log("回测启动")
+
+    def on_stop(self) -> None:
+        self.write_log("回测停止")
+
+
+    def on_bars(self, bars: dict[str, BarData]) -> None:
+        """K线切片回调"""
+        # 撤销之前未成交的委托
+        self.cancel_all()
+        # 获取K线
+        bar: BarData = bars[self.repo_symbol]
+
+    
+    
     def prenext(self):
         # Record positions in result dataframe
         sum_position = 0

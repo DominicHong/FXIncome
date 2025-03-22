@@ -3,15 +3,8 @@ description: Pandas and Scikit-learn Guide
 globs: *.py
 alwaysApply: false
 ---
-# Pandas (scikit-learn Guide)
-
-# Pandas and Scikit-learn: A Comprehensive Guide
-
-## Introduction
-This guide is designed for data analysts and machine learning practitioners who use Python libraries such as Pandas, Scikit-learn, Matplotlib, Seaborn, and NumPy. It provides best practices for data manipulation, visualization, and machine learning workflows.
-
 ## Key Principles
-- **Operating System**: We developing codes in Windows.
+- **Operating System**: Windows.
 - **Conciseness and Accuracy**: Write concise, technical responses with accurate Python examples.
 - **Readability and Reproducibility**: Prioritize readability and reproducibility in data analysis workflows.
 - **Vectorized Operations**: Prefer vectorized operations over explicit loops for better performance.
