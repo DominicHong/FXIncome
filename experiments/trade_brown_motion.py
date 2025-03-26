@@ -3,7 +3,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import stats
 import seaborn as sns
-from typing import Optional, Literal, Dict
 
 
 class BondPriceSimulator:
@@ -23,7 +22,7 @@ class BondPriceSimulator:
         days: int = 250,
         days_of_year: int = 250,  # Assume 250 trading days in a year.
         num_paths: int = 10,
-        mode: Literal["discrete", "continuous"] = "continuous"
+        mode: str = "continuous"  # Using str since Literal is not needed here
     ):
         """Initialize the simulator with given parameters.
 
@@ -42,7 +41,7 @@ class BondPriceSimulator:
         self.days = days
         self.num_paths = num_paths
         self.mode = mode
-        self.prices_df: Optional[pd.DataFrame] = None
+        self.prices_df: pd.DataFrame | None = None
         self.days_of_year = days_of_year
         self._dt = 1 / self.days_of_year  # The annualized sigma is estimated from trade days. 
         self._sqrt_dt = np.sqrt(self._dt)
@@ -244,6 +243,8 @@ class TradeSimulator:
     3. Short 1 unit (-1) [only if short_selling is allowed]
     
     Trading rules based on predictions:
+    - Trading occurs every trading_interval days
+    - At day T, the predictor predicts price direction at T + trading_interval
     - If predicted UP:
         - No position -> Buy 1 unit
         - Long -> Hold
@@ -263,6 +264,7 @@ class TradeSimulator:
         days_of_year: int = 250,  # Assume 250 trading days in a year.
         slippage: float = 0.0004,  # 0.04% slippage by default
         short_selling: bool = True,  # Whether to allow short selling
+        trading_interval: int = 5,  # Trading interval in days
     ):
         """Initialize the trade simulator.
         
@@ -274,6 +276,7 @@ class TradeSimulator:
             days_of_year: Number of trading days in a year
             slippage: Trading slippage as a percentage (e.g., 0.0004 for 0.04%)
             short_selling: Whether to allow short selling
+            trading_interval: Number of days between trades (default: 5)
         """
         self.prices_df = prices_df
         self.initial_capital = initial_capital
@@ -282,7 +285,8 @@ class TradeSimulator:
         self.daily_rf_rate = risk_free_rate / days_of_year
         self.slippage = slippage
         self.short_selling = short_selling
-        self.results: Dict[str, pd.DataFrame] = {}
+        self.trading_interval = trading_interval
+        self.results: dict[str, pd.DataFrame] = {}
     
     def _calculate_trade_price(self, base_price: float, is_buy: bool) -> float:
         """Calculate the actual trade price including slippage.
@@ -297,9 +301,55 @@ class TradeSimulator:
         slippage_factor = 1 + (self.slippage if is_buy else -self.slippage)
         return base_price * slippage_factor
     
-    def simulate_trades(self) -> Dict[str, pd.DataFrame]:
+    def _generate_predictions(
+        self, 
+        prices: pd.Series,
+        random_seed: int | None = None
+    ) -> np.ndarray:
+        """Generate predictions with exactly the target accuracy for future price movements.
+        
+        Args:
+            prices: Series of price values
+            random_seed: Optional random seed for reproducible predictions. If None, predictions
+                        will be random each time.
+        
+        Returns:
+            numpy array of boolean predictions with exactly the target accuracy
+        """
+        # Calculate future returns and actual price changes
+        future_returns = prices.shift(-self.trading_interval) - prices
+        actual_changes = (future_returns > 0)
+        
+        n_predictions = len(actual_changes)
+        n_correct = round(n_predictions * self.prediction_accuracy)
+        
+        # Set random seed if provided
+        if random_seed is not None:
+            np.random.seed(random_seed)
+            
+        predictions = np.zeros(n_predictions, dtype=bool)
+        # Randomly select which predictions will be correct
+        correct_indices = np.random.choice(n_predictions, size=n_correct, replace=False)
+        
+        # Set predictions to achieve exact accuracy
+        for i in range(n_predictions):
+            if i in correct_indices:
+                predictions[i] = actual_changes.iloc[i]  # Correct prediction
+            else:
+                predictions[i] = not actual_changes.iloc[i]  # Incorrect prediction
+                
+        # Reset random seed if it was set
+        if random_seed is not None:
+            np.random.seed(None)
+            
+        return predictions
+    
+    def simulate_trades(self, random_seed: int | None = None) -> dict[str, pd.DataFrame]:
         """Simulate trades for all price paths and calculate statistics.
         
+        Args:
+            random_seed: Optional random seed for reproducible predictions. If None, predictions
+                        will be random each time.
         Returns:
             Dict containing DataFrames with trading results and statistics
         """
@@ -310,32 +360,22 @@ class TradeSimulator:
             # Get price series for this path
             prices = self.prices_df[column]
             
-            # Generate predictions (True = Up, False = Down)
-            daily_returns = prices.pct_change()
-            actual_ups = daily_returns > 0
-            
-            # Simulate prediction accuracy
-            random_mask = np.random.random(len(prices)) < self.prediction_accuracy
-            predictions = np.where(
-                random_mask,
-                actual_ups,  # Correct prediction
-                ~actual_ups  # Incorrect prediction
-            )
+            # Generate predictions for price changes
+            predictions = self._generate_predictions(prices, random_seed=random_seed)
             
             # Initialize trading variables
             position = 0  # Start with no position
             capital = self.initial_capital
             trades = []
             
-            # Simulate trading
-            for t in range(1, len(prices)):
-                prev_price = prices.iloc[t-1]
+            # Simulate trading every trading_interval days
+            for t in range(0, len(prices) - self.trading_interval, self.trading_interval):
                 curr_price = prices.iloc[t]
                 
                 # Record state before trade
                 trades.append({
                     'date': prices.index[t],
-                    'price': prev_price,
+                    'price': curr_price,
                     'position': position,
                     'capital': capital,
                     'prediction': 'Up' if predictions[t] else 'Down'
@@ -345,27 +385,37 @@ class TradeSimulator:
                 if predictions[t]:  # Predicted Up
                     if position == 0:  # No position -> Buy
                         position = 1
-                        trade_price = self._calculate_trade_price(prev_price, is_buy=True)
+                        trade_price = self._calculate_trade_price(curr_price, is_buy=True)
                         capital -= trade_price
                     elif position == -1 and self.short_selling:  # Short -> Close position
                         position = 0
-                        trade_price = self._calculate_trade_price(prev_price, is_buy=True)
+                        trade_price = self._calculate_trade_price(curr_price, is_buy=True)
                         capital -= trade_price  # Buy to close short
                 else:  # Predicted Down
                     if position == 0 and self.short_selling:  # No position -> Short (only if allowed)
                         position = -1
-                        trade_price = self._calculate_trade_price(prev_price, is_buy=False)
+                        trade_price = self._calculate_trade_price(curr_price, is_buy=False)
                         capital += trade_price
                     elif position == 1:  # Long -> Close position
                         position = 0
-                        trade_price = self._calculate_trade_price(prev_price, is_buy=False)
+                        trade_price = self._calculate_trade_price(curr_price, is_buy=False)
                         capital += trade_price  # Sell to close long
-            
+                
+                # Record state for days between trades
+                for inter_t in range(t+1, min(t+self.trading_interval, len(prices))):
+                    trades.append({
+                        'date': prices.index[inter_t],
+                        'price': prices.iloc[inter_t],
+                        'position': position,
+                        'capital': capital,
+                        'prediction': 'Hold'  # No prediction on non-trading days
+                    })
+
             # Close final position at last price
             if position == 1:
                 final_trade_price = self._calculate_trade_price(prices.iloc[-1], is_buy=False)
                 capital += final_trade_price
-            elif position == -1 and self.short_selling:
+            elif position == -1:
                 final_trade_price = self._calculate_trade_price(prices.iloc[-1], is_buy=True)
                 capital -= final_trade_price
             
@@ -468,6 +518,8 @@ class AggressiveTradeSimulator(TradeSimulator):
     3. Short 1 unit (-1) [only if short_selling is allowed]
     
     Trading rules based on predictions:
+    - Trading occurs every trading_interval days
+    - At day T, the predictor predicts price direction at T + trading_interval
     - If predicted UP:
         - Always adjust position to +1 (long 1 unit)
     - If predicted DOWN:
@@ -475,9 +527,11 @@ class AggressiveTradeSimulator(TradeSimulator):
         - Otherwise adjust position to 0 (no position)
     """
     
-    def simulate_trades(self) -> Dict[str, pd.DataFrame]:
+    def simulate_trades(self, random_seed: int | None = None) -> dict[str, pd.DataFrame]:
         """Simulate trades for all price paths and calculate statistics.
-        
+        Args:
+            random_seed: Optional random seed for reproducible predictions. If None, predictions
+                        will be random each time.
         Returns:
             Dict containing DataFrames with trading results and statistics
         """
@@ -488,32 +542,22 @@ class AggressiveTradeSimulator(TradeSimulator):
             # Get price series for this path
             prices = self.prices_df[column]
             
-            # Generate predictions (True = Up, False = Down)
-            daily_returns = prices.pct_change()
-            actual_ups = daily_returns > 0
-            
-            # Simulate prediction accuracy
-            random_mask = np.random.random(len(prices)) < self.prediction_accuracy
-            predictions = np.where(
-                random_mask,
-                actual_ups,  # Correct prediction
-                ~actual_ups  # Incorrect prediction
-            )
+            # Generate predictions for price changes
+            predictions = self._generate_predictions(prices, random_seed=random_seed)
             
             # Initialize trading variables
             position = 0  # Start with no position
             capital = self.initial_capital
             trades = []
             
-            # Simulate trading
-            for t in range(1, len(prices)):
-                prev_price = prices.iloc[t-1]
+            # Simulate trading every trading_interval days
+            for t in range(0, len(prices) - self.trading_interval, self.trading_interval):
                 curr_price = prices.iloc[t]
                 
                 # Record state before trade
                 trades.append({
                     'date': prices.index[t],
-                    'price': prev_price,
+                    'price': curr_price,
                     'position': position,
                     'capital': capital,
                     'prediction': 'Up' if predictions[t] else 'Down'
@@ -528,14 +572,24 @@ class AggressiveTradeSimulator(TradeSimulator):
                 # Calculate position change and update capital
                 position_change = target_position - position
                 if position_change > 0:  # Need to buy
-                    trade_price = self._calculate_trade_price(prev_price, is_buy=True)
+                    trade_price = self._calculate_trade_price(curr_price, is_buy=True)
                     capital -= position_change * trade_price
                 elif position_change < 0:  # Need to sell
-                    trade_price = self._calculate_trade_price(prev_price, is_buy=False)
+                    trade_price = self._calculate_trade_price(curr_price, is_buy=False)
                     capital += abs(position_change) * trade_price
                 
                 # Update position
                 position = target_position
+                
+                # Record state for days between trades
+                for inter_t in range(t+1, min(t+self.trading_interval, len(prices))):
+                    trades.append({
+                        'date': prices.index[inter_t],
+                        'price': prices.iloc[inter_t],
+                        'position': position,
+                        'capital': capital,
+                        'prediction': 'Hold'  # No prediction on non-trading days
+                    })
             
             # Close final position at last price
             if position == 1:
@@ -593,16 +647,16 @@ if __name__ == "__main__":
     sim_params = {
         'prices_df': prices_df,
         'initial_capital': 110.0,
-        'prediction_accuracy': 0.6,
+        'prediction_accuracy': 0.7,
         'risk_free_rate': 0.02,
         'days_of_year': discrete_simulator.days_of_year,
-        'slippage': 0.0001,  # Add 0.01% slippage
-        'short_selling': False  # Disable short selling
+        'slippage': 0.0001,  
+        'short_selling': True,  # Enable short selling
+        'trading_interval': 5  # Trading interval defaults to 5 day
     }
     
     # Run simulations with short selling enabled
     print("\nResults with Short Selling Enabled:")
-    sim_params['short_selling'] = True
     
     conservative_trade_sim = TradeSimulator(**sim_params)
     aggressive_trade_sim = AggressiveTradeSimulator(**sim_params)
@@ -611,10 +665,10 @@ if __name__ == "__main__":
     results2 = aggressive_trade_sim.simulate_trades()
     
     print("\nStrategy 1 (Conservative) Results:")
-    conservative_trade_sim.plot_results()
+    # conservative_trade_sim.plot_results()
     
     print("\nStrategy 2 (Aggressive) Results:")
-    aggressive_trade_sim.plot_results()
+    # aggressive_trade_sim.plot_results()
     
     # Run simulations with short selling disabled
     print("\nResults with Short Selling Disabled:")
@@ -623,14 +677,14 @@ if __name__ == "__main__":
     conservative_trade_sim_no_short = TradeSimulator(**sim_params)
     aggressive_trade_sim_no_short = AggressiveTradeSimulator(**sim_params)
     
-    results3 = conservative_trade_sim_no_short.simulate_trades()
-    results4 = aggressive_trade_sim_no_short.simulate_trades()
+    results3 = conservative_trade_sim_no_short.simulate_trades(random_seed=42)
+    results4 = aggressive_trade_sim_no_short.simulate_trades(random_seed=42)
     
     print("\nStrategy 1 (Conservative, No Short) Results:")
-    conservative_trade_sim_no_short.plot_results()
+    # conservative_trade_sim_no_short.plot_results()
     
     print("\nStrategy 2 (Aggressive, No Short) Results:")
-    aggressive_trade_sim_no_short.plot_results()
+    # aggressive_trade_sim_no_short.plot_results()
     
     # Print detailed statistics comparison
     def print_strategy_stats(name: str, stats: pd.DataFrame):

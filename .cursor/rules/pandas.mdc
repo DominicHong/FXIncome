@@ -1,4 +1,9 @@
 ---
+description: 
+globs: 
+alwaysApply: false
+---
+---
 description: Pandas and Scikit-learn Guide
 globs: *.py
 alwaysApply: false
@@ -33,6 +38,7 @@ alwaysApply: false
 - **Logging**: Capture context in logs for better debugging. Use logging instead of print().
 - **Data Validation**: Validate data types and ranges to ensure data integrity.
 - **Typing Annotation** Always add typing annotations to each function or class, including return types when necessary.
+- **Type Hints**: Use built-in type hints without importing from typing module as long as possible.
 
 ## Performance Optimization
 - **Vectorized Operations**: Use vectorized operations in Pandas and NumPy for improved performance.
