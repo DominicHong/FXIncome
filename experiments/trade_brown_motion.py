@@ -219,15 +219,15 @@ class BondPriceSimulator:
         """
         print("\nTheoretical values:")
         print(f"Mean (theoretical) = {theoretical_mean*100:.4f}%")
-        print(f"Variance (theoretical) = {theoretical_var*100:.4f}%")
+        print(f"Variance (theoretical) = {theoretical_var*100:.6f}%")
         print("\nEmpirical results:")
         print(
             f"Mean (empirical avg) = {results_df['empirical_mean'].mean()*100:.4f}% "
             f"± {results_df['empirical_mean'].std()*100:.4f}%"
         )
         print(
-            f"Variance (empirical avg) = {results_df['empirical_var'].mean()*100:.4f}% "
-            f"± {results_df['empirical_var'].std()*100:.4f}%"
+            f"Variance (empirical avg) = {results_df['empirical_var'].mean()*100:.6f}% "
+            f"± {results_df['empirical_var'].std()*100:.6f}%"
         )
         print("\nShapiro-Wilk normality test results:")
         print(
@@ -955,7 +955,7 @@ if __name__ == "__main__":
     sim_params = {
         "prices_df": prices_df,
         "initial_capital": 110.0,
-        "prediction_accuracy": 0.6,
+        "prediction_accuracy": 0.8,
         "risk_free_rate": 0.02,
         "days_of_year": discrete_simulator.days_of_year,
         "slippage": 0.0003,
@@ -1023,17 +1023,17 @@ if __name__ == "__main__":
     }
 
     param_ranges = {
-        "mu": [-0.10, -0.05, 0, 0.05, 0.10],
+        "mu": [-0.10, -0.05, -0.01, 0.01, 0.05, 0.10],
         "sigma": [0.01, 0.05, 0.10, 0.20, 0.50],
-        "prediction_accuracy": [0.6, 0.7, 0.8, 1.0],
-        "slippage": [0, 0.0002, 0.0004],
-        "trading_interval": [1, 5, 10],
+        "prediction_accuracy": [0.6, 0.7, 0.8, 0.9, 1.0],
+        "slippage": [0, 0.0002, 0.0003, 0.0004],
+        "trading_interval": [1, 5, 10, 20],
     }
 
     analyzer = ParameterAnalyzer(
         base_params=base_params, param_ranges=param_ranges, num_paths=50, random_seed=42
     )
 
-    results = analyzer.analyze_parameters()
-    analyzer.plot_parameter_sensitivity()
-    analyzer.print_summary_table()
+    # results = analyzer.analyze_parameters()
+    # analyzer.plot_parameter_sensitivity()
+    # analyzer.print_summary_table()
