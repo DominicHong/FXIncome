@@ -14,12 +14,12 @@ class IndexExtremeStrategy(IndexStrategy):
         2.2 In "expert mode", positions are adjusted based on expert rate signals.
     """
 
-    def __init__(    
+    def __init__(
         self,
         strategy_engine: StrategyEngine,
         strategy_name: str,
         vt_symbols: list[str],
-        setting: dict
+        setting: dict,
     ):
         super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
         self.expert_mode = setting.get("expert_mode", False)
@@ -105,7 +105,6 @@ class IndexExtremeStrategy(IndexStrategy):
                 positions[x_idx] += 2
                 positions[y_idx] -= 2
 
-        
         # Ensure all positions are non-negative
         positions = [max(0, p) for p in positions]
 
@@ -159,23 +158,16 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Apply adjustments in sequence
         # For 5yr-3yr spread: x_idx=1 (5yr), y_idx=2 (3yr)
-        positions = self._adjust_position(
-            spread_53, positions, 1, 2, expert_signal
-        )
+        positions = self._adjust_position(spread_53, positions, 1, 2, expert_signal)
 
         # For 7yr-5yr spread: x_idx=0 (7yr), y_idx=1 (5yr)
-        positions = self._adjust_position(
-            spread_75, positions, 0, 1, expert_signal
-        )
+        positions = self._adjust_position(spread_75, positions, 0, 1, expert_signal)
 
         # For 7yr-3yr spread: x_idx=0 (7yr), y_idx=2 (3yr)
-        positions = self._adjust_position(
-            spread_73, positions, 0, 2, expert_signal
-        )
+        positions = self._adjust_position(spread_73, positions, 0, 2, expert_signal)
 
         return positions
 
-    
     def on_init(self) -> None:
         self.write_log("回测初始化")
         self.load_bars(1)
@@ -186,16 +178,16 @@ class IndexExtremeStrategy(IndexStrategy):
     def on_stop(self) -> None:
         self.write_log("回测停止")
 
-
     def on_bars(self, bars: dict[str, BarData]) -> None:
         """K线切片回调"""
         # 撤销之前未成交的委托
         self.cancel_all()
         # 获取K线
-        bar: BarData = bars[self.repo_symbol]
+        bar: BarData = bars["010214.CFETS"]
+        print(
+            f"Symbol: {bar.symbol}, Date: {bar.datetime}, YTM: {bar.extra['ytm']}, Matu: {bar.extra['matu']}, Out Bal: {bar.extra['out_bal']}"
+        )
 
-    
-    
     def prenext(self):
         # Record positions in result dataframe
         sum_position = 0

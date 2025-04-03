@@ -2,12 +2,17 @@
 import sqlite3
 import pandas as pd
 import scipy
-import datetime
-from pathlib import Path
-from pandas import DataFrame
-from sklearn.preprocessing import StandardScaler
 import numpy as np
+import pandas as pd
+import os
+import glob
+
+from datetime import datetime
 from fxincome import const, logger
+from vnpy.trader.constant import Exchange, Interval
+from vnpy.trader.database import get_database
+from vnpy.trader.object import BarData
+
 
 
 def process_data(lookback_days: int = 3 * 250):
@@ -58,7 +63,7 @@ def process_data(lookback_days: int = 3 * 250):
         lambda x: scipy.stats.percentileofscore(x, x.iloc[-1], kind='weak') / 100
     )
 
-    # Calculate percentile ranks for averagespread. "weak" means the ratio of samples <= given value
+    # Calculate percentile ranks for average spread. "weak" means the ratio of samples <= given value
     cdb_yc["pctl_avg_53"] = cdb_yc.avg_53.rolling(window=lookback_days).apply(
         lambda x: scipy.stats.percentileofscore(x, x.iloc[-1], kind='weak') / 100
     )
@@ -88,5 +93,78 @@ def process_data(lookback_days: int = 3 * 250):
     return bond_info
 
 
+def load_cdb_ohlc():
+    # Define the directory path
+    directory = r"D:\ProjectRicequant\fxincome\strategies_pool\index_enhancement\cdb_ohlc"
+    
+    # Get all CSV files that don't start with 'cashflow'
+    csv_files = [f for f in glob.glob(os.path.join(directory, "*.csv")) 
+                 if not os.path.basename(f).startswith("cash_flow")]
+    
+    if not csv_files:
+        raise ValueError(f"No valid CSV files found in {directory}")
+    
+    # Initialize an empty list to store DataFrames
+    dfs = []
+    
+    # Read each CSV file and add filename as sec_code
+    for file in csv_files:
+        try:
+            df = pd.read_csv(file)
+            if not df.empty:
+                df['sec_code'] = os.path.splitext(os.path.basename(file))[0]
+                # Drop any completely empty columns
+                df = df.dropna(axis=1, how='all')
+                dfs.append(df)
+            else:
+                logger.warning(f"Empty CSV file found: {file}")
+        except Exception as e:
+            logger.error(f"Error reading file {file}: {str(e)}")
+            continue
+    
+    if not dfs:
+        raise ValueError("No valid data found in any of the CSV files")
+    
+    # Combine all DataFrames
+    combined_df = pd.concat(dfs, ignore_index=True)
+    
+    # Clean up the final DataFrame
+    combined_df = combined_df.dropna(axis=1, how='all')  # Remove any empty columns
+    combined_df = combined_df.drop(columns=["CODE"])
+    combined_df.columns = combined_df.columns.str.lower()
+    print(f"Successfully loaded {len(csv_files)} files. Shape of combined DataFrame: {combined_df.shape}")
+    
+    bars = []
+    for _, row in combined_df.iterrows():
+        dt = datetime.strptime(row["date"], "%Y-%m-%d")
+
+        bar = BarData(
+            symbol=row["sec_code"],
+            exchange=Exchange.CFETS,
+            datetime=dt,
+            interval=Interval.DAILY,
+            open_price=row["open"],
+            high_price=row["high"],
+            low_price=row["low"],
+            close_price=row["close"],
+            volume=row["vol"],
+            gateway_name="CSV",
+        )
+        bar.extra = {
+            "ytm": row["ytm"],
+            "matu": row["matu"],
+            "out_bal": row["out_bal"],
+        }
+        
+        bars.append(bar)
+
+    db = get_database()
+    db.save_bar_data(bars)
+    print(f"Successfully saved {len(bars)} bars to database")
+
+    return combined_df
+
+
 if __name__ == "__main__":
-    process_data(lookback_days=3 * 250)
+    # process_data(lookback_days=3 * 250)
+    load_cdb_ohlc()
