@@ -10,7 +10,7 @@ import glob
 from datetime import datetime
 from fxincome import const, logger
 from vnpy.trader.constant import Exchange, Interval
-from vnpy.trader.database import get_database
+from vnpy.trader.database import get_database, DB_TZ
 from vnpy.trader.object import BarData
 
 
@@ -104,9 +104,7 @@ def load_cdb_ohlc():
     if not csv_files:
         raise ValueError(f"No valid CSV files found in {directory}")
     
-    # Initialize an empty list to store DataFrames
-    dfs = []
-    
+    bar_count = 0
     # Read each CSV file and add filename as sec_code
     for file in csv_files:
         try:
@@ -115,54 +113,45 @@ def load_cdb_ohlc():
                 df['sec_code'] = os.path.splitext(os.path.basename(file))[0]
                 # Drop any completely empty columns
                 df = df.dropna(axis=1, how='all')
-                dfs.append(df)
+                df = df.drop(columns=["CODE"])
+                df.columns = df.columns.str.lower()
+                bars = []
+                for _, row in df.iterrows():
+                    dt = datetime.strptime(row["date"], "%Y-%m-%d")
+                    dt = dt.replace(tzinfo=DB_TZ)
+
+                    bar = BarData(
+                        symbol=row["sec_code"],
+                        exchange=Exchange.CFETS,
+                        datetime=dt,
+                        interval=Interval.DAILY,
+                        open_price=row["open"],
+                        high_price=row["high"],
+                        low_price=row["low"],
+                        close_price=row["close"],
+                        volume=row["vol"],
+                        gateway_name="CSV",
+                    )
+                    bar.extra = {
+                        "ytm": row["ytm"],
+                        "matu": row["matu"],
+                        "out_bal": row["out_bal"],
+                    }
+                    
+                    bars.append(bar)
+                    bar_count += 1
+                db = get_database()
+                # Only ONE symbol should be saved.
+                db.save_bar_data(bars)
             else:
                 logger.warning(f"Empty CSV file found: {file}")
         except Exception as e:
             logger.error(f"Error reading file {file}: {str(e)}")
             continue
     
-    if not dfs:
-        raise ValueError("No valid data found in any of the CSV files")
-    
-    # Combine all DataFrames
-    combined_df = pd.concat(dfs, ignore_index=True)
-    
-    # Clean up the final DataFrame
-    combined_df = combined_df.dropna(axis=1, how='all')  # Remove any empty columns
-    combined_df = combined_df.drop(columns=["CODE"])
-    combined_df.columns = combined_df.columns.str.lower()
-    print(f"Successfully loaded {len(csv_files)} files. Shape of combined DataFrame: {combined_df.shape}")
-    
-    bars = []
-    for _, row in combined_df.iterrows():
-        dt = datetime.strptime(row["date"], "%Y-%m-%d")
+    print(f"Successfully loaded {len(csv_files)} files.")
+    print(f"Successfully saved {bar_count} bars to database")
 
-        bar = BarData(
-            symbol=row["sec_code"],
-            exchange=Exchange.CFETS,
-            datetime=dt,
-            interval=Interval.DAILY,
-            open_price=row["open"],
-            high_price=row["high"],
-            low_price=row["low"],
-            close_price=row["close"],
-            volume=row["vol"],
-            gateway_name="CSV",
-        )
-        bar.extra = {
-            "ytm": row["ytm"],
-            "matu": row["matu"],
-            "out_bal": row["out_bal"],
-        }
-        
-        bars.append(bar)
-
-    db = get_database()
-    db.save_bar_data(bars)
-    print(f"Successfully saved {len(bars)} bars to database")
-
-    return combined_df
 
 
 if __name__ == "__main__":
