@@ -26,31 +26,13 @@ class IndexExtremeStrategy(IndexStrategy):
         # Additional percentile thresholds for more granular control
         self.extreme_low = setting.get("extreme_low_percentile", 0.10)
         self.extreme_high = setting.get("extreme_high_percentile", 0.90)
-        # Lists to track bonds held in each maturity bucket
-        self.code_list_3 = []  # Tracks 3-year bonds currently held
-        self.code_list_5 = []  # Tracks 5-year bonds currently held
-        self.code_list_7 = []  # Tracks 7-year bonds currently held
+        self.current_positions = [0, 0, 0]  # Bond positions in [7yr, 5yr, 3yr]
 
-    def _calculate_spread_percentiles(
-        self, spread_53, spread_75, spread_73
-    ) -> tuple[float, float, float]:
-        """
-        Calculate the spread percentiles in 'lookback_years' for the given spreads.
-
-        Args:
-            spread_53 (float): 5yr-3yr spread
-            spread_75 (float): 7yr-5yr spread
-            spread_73 (float): 7yr-3yr spread
-
-        Returns:
-            tuple (float, float, float): Percentiles of the spreads
-        """
-
-    def _adjust_position(
+    def _calculate_position(
         self, spread_pctl, positions, x_idx, y_idx, expert_signal=None
     ) -> list[float]:
         """
-        Adjust positions based on spread percentile and optional expert signal.
+        Calculate positions based on spread percentile and optional expert signal.
 
         Args:
             spread_pctl (float): Percentile of the spread. Spread = longer bond yield - shorter bond yield.
@@ -61,7 +43,7 @@ class IndexExtremeStrategy(IndexStrategy):
             expert_signal (int, optional): Expert signal, 0 for rates down, 1 for rates up
 
         Returns:
-            list (float): Adjusted positions in [7yr, 5yr, 3yr]
+            list (float): Calculated positions in [7yr, 5yr, 3yr]
         """
         # Check expert_signal is valid
         if self.expert_mode:
@@ -158,35 +140,41 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Apply adjustments in sequence
         # For 5yr-3yr spread: x_idx=1 (5yr), y_idx=2 (3yr)
-        positions = self._adjust_position(spread_53, positions, 1, 2, expert_signal)
+        positions = self._calculate_position(spread_53, positions, 1, 2, expert_signal)
 
         # For 7yr-5yr spread: x_idx=0 (7yr), y_idx=1 (5yr)
-        positions = self._adjust_position(spread_75, positions, 0, 1, expert_signal)
+        positions = self._calculate_position(spread_75, positions, 0, 1, expert_signal)
 
         # For 7yr-3yr spread: x_idx=0 (7yr), y_idx=2 (3yr)
-        positions = self._adjust_position(spread_73, positions, 0, 2, expert_signal)
+        positions = self._calculate_position(spread_73, positions, 0, 2, expert_signal)
 
         return positions
 
+
     def on_init(self) -> None:
-        self.write_log("回测初始化")
+        self.write_log("Initializing backtest...")
         self.load_bars(1)
 
     def on_start(self) -> None:
-        self.write_log("回测启动")
+        self.write_log("Starting backtest...")
 
     def on_stop(self) -> None:
-        self.write_log("回测停止")
+        self.write_log("Stopping backtest...")
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
-        """K线切片回调"""
-        # 撤销之前未成交的委托
+        # Cancel all pending orders
         self.cancel_all()
-        # 获取K线
-        bar: BarData = bars["010214.CFETS"]
-        print(
-            f"Symbol: {bar.symbol}, Date: {bar.datetime}, YTM: {bar.extra['ytm']}, Matu: {bar.extra['matu']}, Out Bal: {bar.extra['out_bal']}"
-        )
+        bar = bars.get("010214.CFETS", None)
+        if bar:
+            print(
+                f"Symbol: {bar.symbol}, Date: {bar.datetime}, YTM: {bar.extra['ytm']}, Matu: {bar.extra['matu']}, Out Bal: {bar.extra['out_bal']}"
+            )
+        bar = bars.get("010216.CFETS", None)
+        if bar:
+            print(
+                f"Symbol: {bar.symbol}, Date: {bar.datetime}, YTM: {bar.extra['ytm']}, Matu: {bar.extra['matu']}, Out Bal: {bar.extra['out_bal']}"
+            )
+
 
     def prenext(self):
         # Record positions in result dataframe
