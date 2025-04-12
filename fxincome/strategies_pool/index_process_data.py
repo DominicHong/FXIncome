@@ -133,9 +133,9 @@ def load_cdb_ohlc():
                         gateway_name="CSV",
                     )
                     bar.extra = {
-                        "ytm": row["ytm"],
-                        "matu": row["matu"],
-                        "out_bal": row["out_bal"],
+                        "ytm": float(row["ytm"]),
+                        "matu": float(row["matu"]),
+                        "out_bal": float(row["out_bal"]),
                     }
                     
                     bars.append(bar)

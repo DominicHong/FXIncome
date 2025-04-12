@@ -7,13 +7,13 @@ from fxincome import const
 
 class IndexStrategy(StrategyTemplate):
         
-    SIZE = 6e6  # Bond Size. 100 face value per unit size. 6 million size -> 600 million face value.
+    TOTAL_SIZE = 6e6  # Bond Size. 100 face value per unit size. 6 million size -> 600 million face value.
     CASH_AVAILABLE = 630e6  # If use more than available cash, you need to borrow cash.
     MAX_CASH = 10e8  # Maximum cash for backtrader. Order will be rejected if cash is insufficient.
     TOTAL_POS = 6  # Total units of positions.
 
     # Fixed parameters to be shown and set in the UI
-    parameters = ["SIZE", "CASH_AVAILABLE", "MAX_CASH", "TOTAL_POS"]
+    parameters = ["TOTAL_SIZE", "CASH_AVAILABLE", "MAX_CASH", "TOTAL_POS"]
 
     # Variables to be shown in the UI
     variables = [
