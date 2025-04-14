@@ -1,21 +1,31 @@
 import pandas as pd
 import sqlite3
-from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from vnpy_portfoliostrategy import StrategyEngine
 from vnpy.trader.object import BarData
 from fxincome.backtest.index_strategy import IndexStrategy
-from fxincome import const
+from fxincome import const, logger
 
 # Symbol = code + exchange. All positions must be >= 0
-SymbolPosition = namedtuple("SymbolPosition", ["symbol", "position"])
+@dataclass
+class SymbolPosition:
+    symbol: str
+    position: float
 
 @dataclass
 class TenorPositions:
-    positions: list = []  # A list of namedtuple(symbol, position}
+    positions: list = field(
+        default_factory=list
+    )  # A list of SymbolPosition(symbol, position)
 
     def total_position(self) -> float:
         return sum(p.position for p in self.positions)
+    
+    def get_position(self, symbol: str) -> float:
+        for p in self.positions:
+            if p.symbol == symbol:
+                return p.position
+        return 0
 
     def add_bond(self, symbol: str, position: float):
         for p in self.positions:
@@ -32,6 +42,7 @@ class TenorPositions:
                 if p.position < 0:
                     raise ValueError(f"Position for {symbol} is negative: {p.position}")
                 break
+
 
 class IndexExtremeStrategy(IndexStrategy):
     """
@@ -63,6 +74,9 @@ class IndexExtremeStrategy(IndexStrategy):
         conn = sqlite3.connect(const.DB.SQLITE_CONN)
         cdb_yc_table = const.DB.TABLES.IndexEnhancement.CDB_YC
         self.cdb_yc = pd.read_sql(f"SELECT * FROM [{cdb_yc_table}]", conn)
+        # Convert date strings to date objects and set as index
+        self.cdb_yc['date'] = pd.to_datetime(self.cdb_yc['date']).dt.date
+        self.cdb_yc.set_index('date', inplace=True)
         conn.close()
 
     def _calculate_position(
@@ -189,64 +203,89 @@ class IndexExtremeStrategy(IndexStrategy):
 
         return positions
 
-    def _select_bonds(
-        self, bars: list[BarData], min_vol: float = 1e9, mode: str = "max_ytm"
+    def _select_bonds_for_buy(
+        self, bars: dict[str, BarData], min_vol: float = 1e9, mode: str = "max_ytm"
     ) -> list[BarData]:
         """
-        Select bars for 3 positions in [7yr, 5yr, 3yr]
+        Select bond bars for buying in [7yr, 5yr, 3yr]. Each tenor has only one bond bar.
 
         Args:
-            bars(list): list of bars to be selected from
+            bars(dict): dict of bars to be selected from
             min_vol(float): minimum volume required for a bond to be considered
             mode(str): "max_ytm", "max_vol", "match_matu"
 
         Returns:
             list[BarData]: 3 bars in [7yr, 5yr, 3yr]
         """
+        bond_bars = [[], [], []]  # Bond bars candidates for [7yr, 5yr, 3yr]
         for bar in bars.values():
             # Filter out bonds with low volume.
-            if bar.volume <= min_vol:
+            if bar.volume < min_vol:
                 continue
             # Assign bars into 3 lists according to their remaining maturities
             if bar.extra["matu"] >= 6 and bar.extra["matu"] <= 8:
-                self.current_bond_bars[0].append(bar)
+                bond_bars[0].append(bar)
             elif bar.extra["matu"] >= 4 and bar.extra["matu"] < 6:
-                self.current_bond_bars[1].append(bar)
+                bond_bars[1].append(bar)
             elif bar.extra["matu"] >= 2 and bar.extra["matu"] < 4:
-                self.current_bond_bars[2].append(bar)
+                bond_bars[2].append(bar)
 
-            if mode == "max_ytm":
-                return [
-                    max(self.current_bond_bars[0], key=lambda x: x.extra["ytm"]),
-                    max(self.current_bond_bars[1], key=lambda x: x.extra["ytm"]),
-                    max(self.current_bond_bars[2], key=lambda x: x.extra["ytm"]),
-                ]
-            elif mode == "max_vol":
-                return [
-                    max(self.current_bond_bars[0], key=lambda x: x.volume),
-                    max(self.current_bond_bars[1], key=lambda x: x.volume),
-                    max(self.current_bond_bars[2], key=lambda x: x.volume),
-                ]
-            # Find the bond with the closest remaining maturity to the target maturities.
-            elif mode == "match_matu":
-                return [
+        if mode == "max_ytm":
+            return [
+                (
+                    max(bond_bars[0], key=lambda x: x.extra["ytm"])
+                    if bond_bars[0]
+                    else None
+                ),
+                (
+                    max(bond_bars[1], key=lambda x: x.extra["ytm"])
+                    if bond_bars[1]
+                    else None
+                ),
+                (
+                    max(bond_bars[2], key=lambda x: x.extra["ytm"])
+                    if bond_bars[2]
+                    else None
+                ),
+            ]
+        elif mode == "max_vol":
+            return [
+                max(bond_bars[0], key=lambda x: x.volume) if bond_bars[0] else None,
+                max(bond_bars[1], key=lambda x: x.volume) if bond_bars[1] else None,
+                max(bond_bars[2], key=lambda x: x.volume) if bond_bars[2] else None,
+            ]
+        # Find the bond with the closest remaining maturity to the target maturities.
+        elif mode == "match_matu":
+            return [
+                (
                     min(
-                        self.current_bond_bars[0],
+                        bond_bars[0],
                         key=lambda x: abs(x.extra["matu"] - 7),
-                    ),
+                    )
+                    if bond_bars[0]
+                    else None
+                ),
+                (
                     min(
-                        self.current_bond_bars[1],
+                        bond_bars[1],
                         key=lambda x: abs(x.extra["matu"] - 5),
-                    ),
+                    )
+                    if bond_bars[1]
+                    else None
+                ),
+                (
                     min(
-                        self.current_bond_bars[2],
+                        bond_bars[2],
                         key=lambda x: abs(x.extra["matu"] - 3),
-                    ),
-                ]
-            else:
-                raise ValueError(
-                    f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_matu'."
-                )
+                    )
+                    if bond_bars[2]
+                    else None
+                ),
+            ]
+        else:
+            raise ValueError(
+                f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_matu'."
+            )
 
     def on_init(self) -> None:
         self.write_log("Initializing backtest...")
@@ -262,15 +301,30 @@ class IndexExtremeStrategy(IndexStrategy):
         # Cancel all pending orders
         self.cancel_all()
 
-        # Select bonds for 3 positions in [7yr, 5yr, 3yr]
-        bond_bars = self._select_bonds(bars, min_vol=1e9, mode="match_matu")
+        # Get bonds with sufficient volume(self.min_vol) for trading
+        sufficient_volume_bars = {
+            symbol: bar for symbol, bar in bars.items() if bar.volume >= self.min_vol
+        }
+        # if no bond with sufficient volume, skip
+        if not sufficient_volume_bars:
+            self.write_log("No valid bond bars found for today. Skipping.")
+            return
 
-        today = bond_bars[0].datetime.date()
+        today = next(iter(sufficient_volume_bars.values())).datetime.date()
+
+        # Select bonds for 3 positions in [7yr, 5yr, 3yr]
+        bond_bars_for_buy = self._select_bonds_for_buy(
+            sufficient_volume_bars, min_vol=self.min_vol, mode="match_matu"
+        )
 
         # Get 'pctl_avg_53', 'pctl_avg_75', 'pctl_avg_73' for today
-        pctl_avg_53 = self.cdb_yc.loc[today, "pctl_avg_53"]
-        pctl_avg_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
-        pctl_avg_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
+        try:
+            pctl_avg_53 = self.cdb_yc.loc[today, "pctl_avg_53"]
+            pctl_avg_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
+            pctl_avg_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
+        except KeyError:
+            self.write_log(f"No spread data found for {today}. Skipping.")
+            return
 
         # Calculate positions based on average spread percentiles
         if self.expert_mode:
@@ -282,93 +336,75 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Calculate size changes for each position
         delta_sizes = [
-            target_positions[i] - self.current_positions[i].total_position() for i in range(3)
+            target_positions[i] - self.current_positions[i].total_position()
+            for i in range(3)
         ]
+        self.write_log(f"today: {today}")
+        # self.write_log(f"sufficient_volume_bars: {sufficient_volume_bars}")
+        # self.write_log(f"bond_bars_for_buy: {bond_bars_for_buy}")
+        self.write_log(f"target_positions: {target_positions}")
+        self.write_log(f"delta_sizes: {delta_sizes}")
+
         # Execute trades
         for i in range(3):
             if delta_sizes[i] > 0:
-                self.buy(
-                    vt_symbol=bond_bars[i].symbol + bond_bars[i].exchange,
-                    price=bond_bars[i].close,
-                    volume=delta_sizes[i],
-                )
-                self.current_positions[i].add_bond(
-                    symbol=bond_bars[i].symbol + bond_bars[i].exchange,
-                    position=delta_sizes[i]
-                )
+                # If there is a bond bar candidatefor buying, buy it
+                if bond_bars_for_buy[i]:
+                    symbol = bond_bars_for_buy[i].symbol + "." + bond_bars_for_buy[i].exchange.value
+                    orderids = self.buy(   
+                        vt_symbol=symbol,
+                        price=bond_bars_for_buy[i].close_price,
+                        volume=delta_sizes[i],
+                    )
+                    self.current_positions[i].add_bond(
+                        symbol=symbol,
+                        position=delta_sizes[i],
+                    )
+                    for oid in orderids:
+                        order = self.get_order(oid)
+                        self.write_log(f"订单状态： {order.status}， 数量： {order.volume}， 价格： {order.price}")
+                    self.write_log(f"{symbol}实际持仓: {self.get_pos(symbol)}，虚拟持仓： {self.current_positions[i].get_position(symbol)}")
+                # No bond bar candidate for buying, skip
+                else:
+                    continue
 
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
                 # Get all positions for this tenor
                 tenor_positions = self.current_positions[i]
-                
+
                 # Try to sell from each position until we've sold enough
-                for pos in tenor_positions.positions[:]:  # Make a copy to safely modify while iterating
+                for pos in tenor_positions.positions[
+                    :
+                ]:  # Make a copy to safely modify while iterating
                     if remaining_to_sell <= 0:
                         break
-                        
-                    # Check if this bond's volume is sufficient
+
                     bond_symbol = pos.symbol
-                    bond_bar = bars.get(bond_symbol, None)
-                    if bond_bar and bond_bar.volume > self.min_vol:
+                    bond_bar = sufficient_volume_bars.get(bond_symbol, None)
+                    # If the bond bar has sufficient volume, sell it
+                    if bond_bar:
                         # Calculate how much we can sell from this position
                         amount_to_sell = min(remaining_to_sell, pos.position)
-                        
+
                         # Execute the sell order
-                        self.sell(
+                        orderids = self.sell(
                             vt_symbol=bond_symbol,
-                            price=bond_bar.close,
-                            volume=amount_to_sell
+                            price=bond_bar.close_price,
+                            volume=amount_to_sell,
                         )
                         
                         # Update the position
                         tenor_positions.substract_bond(bond_symbol, amount_to_sell)
-                        remaining_to_sell -= amount_to_sell
                         
+                        for oid in orderids:
+                            order = self.get_order(oid)
+                            self.write_log(f"订单状态： {order.status}， 数量： {order.volume}， 价格： {order.price}")
+                        self.write_log(f"{bond_symbol}实际持仓: {self.get_pos(bond_symbol)}，虚拟持仓： {tenor_positions.get_position(bond_symbol)}")
+                        
+                        remaining_to_sell -= amount_to_sell
+
                         # If position is now 0, remove it from the list
                         if pos.position == 0:
                             tenor_positions.positions.remove(pos)
 
-        bar = bars.get("010214.CFETS", None)
-        if bar:
-            print(
-                f"Symbol: {bar.symbol}, Date: {bar.datetime}, YTM: {bar.extra['ytm']}, Matu: {bar.extra['matu']}, Out Bal: {bar.extra['out_bal']}"
-            )
-        bar = bars.get("010216.CFETS", None)
-        if bar:
-            print(
-                f"Symbol: {bar.symbol}, Date: {bar.datetime}, YTM: {bar.extra['ytm']}, Matu: {bar.extra['matu']}, Out Bal: {bar.extra['out_bal']}"
-            )
-
-    def sell_bond(self, amount_to_sell, sell_list, code_list):
-        """
-        Sell bonds from a specific maturity bucket.
-
-        Args:
-            amount_to_sell (float): Amount to sell
-            sell_list (list): List of bonds to consider selling
-            code_list (list): List of codes for this maturity bucket
-
-        Returns:
-            list: Updated code_list after selling
-        """
-        code_all = code_list.copy()
-        if amount_to_sell < self.getposition(self.getdatabyname(sell_list[0])).size:
-            self.sell(data=self.getdatabyname(sell_list[0]), size=amount_to_sell)
-        elif amount_to_sell == self.getposition(self.getdatabyname(sell_list[0])).size:
-            self.sell(data=self.getdatabyname(sell_list[0]), size=amount_to_sell)
-            code_list.remove(sell_list[0])
-        else:
-            for bond in code_all:
-                bond_size = self.getposition(self.getdatabyname(bond)).size
-                if bond_size <= amount_to_sell:
-                    self.sell(data=self.getdatabyname(bond), size=bond_size)
-                    amount_to_sell -= bond_size
-                    code_list.remove(bond)
-                else:
-                    self.sell(data=self.getdatabyname(bond), size=amount_to_sell)
-                    amount_to_sell = 0
-                if amount_to_sell == 0:
-                    break
-        sell_list.remove(sell_list[0])
-        return code_list, sell_list
