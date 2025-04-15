@@ -2,15 +2,18 @@ import pandas as pd
 import sqlite3
 from dataclasses import dataclass, field
 from vnpy_portfoliostrategy import StrategyEngine
-from vnpy.trader.object import BarData
+from vnpy.trader.object import BarData, TradeData
+from vnpy.trader.constant import Status
 from fxincome.backtest.index_strategy import IndexStrategy
 from fxincome import const, logger
+
 
 # Symbol = code + exchange. All positions must be >= 0
 @dataclass
 class SymbolPosition:
     symbol: str
     position: float
+
 
 @dataclass
 class TenorPositions:
@@ -20,7 +23,7 @@ class TenorPositions:
 
     def total_position(self) -> float:
         return sum(p.position for p in self.positions)
-    
+
     def get_position(self, symbol: str) -> float:
         for p in self.positions:
             if p.symbol == symbol:
@@ -75,8 +78,8 @@ class IndexExtremeStrategy(IndexStrategy):
         cdb_yc_table = const.DB.TABLES.IndexEnhancement.CDB_YC
         self.cdb_yc = pd.read_sql(f"SELECT * FROM [{cdb_yc_table}]", conn)
         # Convert date strings to date objects and set as index
-        self.cdb_yc['date'] = pd.to_datetime(self.cdb_yc['date']).dt.date
-        self.cdb_yc.set_index('date', inplace=True)
+        self.cdb_yc["date"] = pd.to_datetime(self.cdb_yc["date"]).dt.date
+        self.cdb_yc.set_index("date", inplace=True)
         conn.close()
 
     def _calculate_position(
@@ -340,34 +343,35 @@ class IndexExtremeStrategy(IndexStrategy):
             for i in range(3)
         ]
         self.write_log(f"today: {today}")
-        # self.write_log(f"sufficient_volume_bars: {sufficient_volume_bars}")
-        # self.write_log(f"bond_bars_for_buy: {bond_bars_for_buy}")
         self.write_log(f"target_positions: {target_positions}")
         self.write_log(f"delta_sizes: {delta_sizes}")
 
         # Execute trades
         for i in range(3):
             if delta_sizes[i] > 0:
-                # If there is a bond bar candidatefor buying, buy it
-                if bond_bars_for_buy[i]:
-                    symbol = bond_bars_for_buy[i].symbol + "." + bond_bars_for_buy[i].exchange.value
-                    orderids = self.buy(   
-                        vt_symbol=symbol,
-                        price=bond_bars_for_buy[i].close_price,
-                        volume=delta_sizes[i],
-                    )
-                    self.current_positions[i].add_bond(
-                        symbol=symbol,
-                        position=delta_sizes[i],
-                    )
-                    for oid in orderids:
-                        order = self.get_order(oid)
-                        self.write_log(f"订单状态： {order.status}， 数量： {order.volume}， 价格： {order.price}")
-                    self.write_log(f"{symbol}实际持仓: {self.get_pos(symbol)}，虚拟持仓： {self.current_positions[i].get_position(symbol)}")
                 # No bond bar candidate for buying, skip
-                else:
+                if not bond_bars_for_buy[i]:
                     continue
 
+                # Buy the selected bond
+                symbol = (
+                    bond_bars_for_buy[i].symbol
+                    + "."
+                    + bond_bars_for_buy[i].exchange.value
+                )
+                
+                # Buy at 5% above the close price. Normally it will be filled on T+1's open.
+                buy_price = bond_bars_for_buy[i].close_price * 1.05
+
+                self.buy(
+                    vt_symbol=symbol,
+                    price=buy_price,
+                    volume=delta_sizes[i],
+                )
+                self.current_positions[i].add_bond(
+                    symbol=symbol,
+                    position=delta_sizes[i],
+                )
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
                 # Get all positions for this tenor
@@ -377,34 +381,39 @@ class IndexExtremeStrategy(IndexStrategy):
                 for pos in tenor_positions.positions[
                     :
                 ]:  # Make a copy to safely modify while iterating
+                    
                     if remaining_to_sell <= 0:
                         break
 
                     bond_symbol = pos.symbol
                     bond_bar = sufficient_volume_bars.get(bond_symbol, None)
-                    # If the bond bar has sufficient volume, sell it
-                    if bond_bar:
-                        # Calculate how much we can sell from this position
-                        amount_to_sell = min(remaining_to_sell, pos.position)
+                    # Skip if the bond doesn't have sufficient volume
+                    if not bond_bar:
+                        continue
+                        
+                    # Calculate how much we can sell from this position
+                    amount_to_sell = min(remaining_to_sell, pos.position)
 
-                        # Execute the sell order
-                        orderids = self.sell(
-                            vt_symbol=bond_symbol,
-                            price=bond_bar.close_price,
-                            volume=amount_to_sell,
-                        )
-                        
-                        # Update the position
-                        tenor_positions.substract_bond(bond_symbol, amount_to_sell)
-                        
-                        for oid in orderids:
-                            order = self.get_order(oid)
-                            self.write_log(f"订单状态： {order.status}， 数量： {order.volume}， 价格： {order.price}")
-                        self.write_log(f"{bond_symbol}实际持仓: {self.get_pos(bond_symbol)}，虚拟持仓： {tenor_positions.get_position(bond_symbol)}")
-                        
-                        remaining_to_sell -= amount_to_sell
+                    # Execute the sell order
+                    # Sell at 5% below the close price. Normally it will be filled on T+1's open.
+                    sell_price = bond_bar.close_price * 0.95
+                    self.sell(
+                        vt_symbol=bond_symbol,
+                        price=sell_price,
+                        volume=amount_to_sell,
+                    )
 
-                        # If position is now 0, remove it from the list
-                        if pos.position == 0:
-                            tenor_positions.positions.remove(pos)
+                    # Update the position
+                    tenor_positions.substract_bond(bond_symbol, amount_to_sell)
+
+                    remaining_to_sell -= amount_to_sell
+
+                    # If position is now 0, remove it from the list
+                    if pos.position == 0:
+                        tenor_positions.positions.remove(pos)
+
+
+def update_trade(self, trade: TradeData) -> None:
+    super().update_trade(trade)
+    self.write_log(f"Trade symbol: {trade.symbol}, datetime: {trade.datetime}, price: {trade.price}, volume: {trade.volume}")
 
