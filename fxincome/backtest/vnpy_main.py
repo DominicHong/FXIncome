@@ -94,7 +94,7 @@ def main():
         annual_days=240,
     )
 
-    show_portafolio(df)
+    # show_portafolio(df)
 
 
 if __name__ == "__main__":

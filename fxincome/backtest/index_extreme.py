@@ -1,9 +1,10 @@
 import pandas as pd
 import sqlite3
+from datetime import datetime
 from dataclasses import dataclass, field
 from vnpy_portfoliostrategy import StrategyEngine
 from vnpy.trader.object import BarData, TradeData
-from vnpy.trader.constant import Status
+from vnpy.trader.database import DB_TZ
 from fxincome.backtest.index_strategy import IndexStrategy
 from fxincome import const, logger
 
@@ -301,16 +302,13 @@ class IndexExtremeStrategy(IndexStrategy):
         self.write_log("Stopping backtest...")
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
-        # Cancel all pending orders
-        self.cancel_all()
-
         # Get bonds with sufficient volume(self.min_vol) for trading
         sufficient_volume_bars = {
             symbol: bar for symbol, bar in bars.items() if bar.volume >= self.min_vol
         }
         # if no bond with sufficient volume, skip
         if not sufficient_volume_bars:
-            self.write_log("No valid bond bars found for today. Skipping.")
+            logger.info("No valid bond bars found for today. Skipping.")
             return
 
         today = next(iter(sufficient_volume_bars.values())).datetime.date()
@@ -326,7 +324,7 @@ class IndexExtremeStrategy(IndexStrategy):
             pctl_avg_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
             pctl_avg_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
         except KeyError:
-            self.write_log(f"No spread data found for {today}. Skipping.")
+            logger.info(f"No spread data found for {today}. Skipping.")
             return
 
         # Calculate positions based on average spread percentiles
@@ -342,9 +340,21 @@ class IndexExtremeStrategy(IndexStrategy):
             target_positions[i] - self.current_positions[i].total_position()
             for i in range(3)
         ]
-        self.write_log(f"today: {today}")
-        self.write_log(f"target_positions: {target_positions}")
-        self.write_log(f"delta_sizes: {delta_sizes}")
+        
+        key_dates = [datetime(2017, 1, 3).date(), datetime(2017, 1, 4).date(), datetime(2024, 4, 26).date(), datetime(2024, 4, 29).date()]
+        if today in key_dates:
+            logger.info(f"today: {today}")
+            for vt_symbol in self.vt_symbols:
+                position = self.get_pos(vt_symbol)
+                if position:
+                    logger.info(f"position of {vt_symbol}: {position}")
+
+            logger.info(
+                f"current_positions: [{self.current_positions[0].total_position()}, {self.current_positions[1].total_position()}, {self.current_positions[2].total_position()}]"
+            )
+            logger.info(f"target_positions: {target_positions}")
+            logger.info(f"delta_sizes: {delta_sizes}")
+            
 
         # Execute trades
         for i in range(3):
@@ -359,7 +369,7 @@ class IndexExtremeStrategy(IndexStrategy):
                     + "."
                     + bond_bars_for_buy[i].exchange.value
                 )
-                
+
                 # Buy at 5% above the close price. Normally it will be filled on T+1's open.
                 buy_price = bond_bars_for_buy[i].close_price * 1.05
 
@@ -372,6 +382,9 @@ class IndexExtremeStrategy(IndexStrategy):
                     symbol=symbol,
                     position=delta_sizes[i],
                 )
+                if today in key_dates:
+                    logger.info(f"Tenor[{i}] Buy {symbol} at {buy_price:.4f} with volume {delta_sizes[i]:.0f}")
+            
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
                 # Get all positions for this tenor
@@ -381,7 +394,7 @@ class IndexExtremeStrategy(IndexStrategy):
                 for pos in tenor_positions.positions[
                     :
                 ]:  # Make a copy to safely modify while iterating
-                    
+
                     if remaining_to_sell <= 0:
                         break
 
@@ -390,7 +403,7 @@ class IndexExtremeStrategy(IndexStrategy):
                     # Skip if the bond doesn't have sufficient volume
                     if not bond_bar:
                         continue
-                        
+
                     # Calculate how much we can sell from this position
                     amount_to_sell = min(remaining_to_sell, pos.position)
 
@@ -402,7 +415,10 @@ class IndexExtremeStrategy(IndexStrategy):
                         price=sell_price,
                         volume=amount_to_sell,
                     )
-
+                    
+                    if today in key_dates:
+                        logger.info(f"Tenor[{i}] Sell {bond_symbol} at {sell_price:.4f} with volume {amount_to_sell:.0f}")
+                    
                     # Update the position
                     tenor_positions.substract_bond(bond_symbol, amount_to_sell)
 
@@ -412,8 +428,13 @@ class IndexExtremeStrategy(IndexStrategy):
                     if pos.position == 0:
                         tenor_positions.positions.remove(pos)
 
-
-def update_trade(self, trade: TradeData) -> None:
-    super().update_trade(trade)
-    self.write_log(f"Trade symbol: {trade.symbol}, datetime: {trade.datetime}, price: {trade.price}, volume: {trade.volume}")
-
+    def update_trade(self, trade: TradeData) -> None:
+        """
+        Overriding update_trade to log trade details
+        """
+        super().update_trade(trade)
+        key_dates = [datetime(2017, 1, 3).date(), datetime(2017, 1, 4).date(), datetime(2024, 4, 26).date(), datetime(2024, 4, 29).date()]
+        if trade.datetime.date() in key_dates:
+            logger.info(
+                f"Trade {trade.direction}: {trade.symbol}, datetime: {trade.datetime.date()}, price: {trade.price:.4f}, volume: {trade.volume:.0f}"
+            )
