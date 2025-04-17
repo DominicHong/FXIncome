@@ -43,10 +43,15 @@ def run_backtesting(
         vt_symbols = discovered_symbols
 
         # Generate default parameters if not provided
-        rates = {symbol: 2 / 10000 for symbol in vt_symbols} if rates is None else rates
+        # Total turnover = volume * size * price.
+        sizes = {symbol: 1 for symbol in vt_symbols} if sizes is None else sizes
+        # Rates are commission rates in percentage.
+        rates = {symbol: 1 / 1e5 for symbol in vt_symbols} if rates is None else rates
+        # Price ticks are the minimum price change in dollars for the asset.
+        priceticks = {symbol: 1 / 10000 for symbol in vt_symbols} if priceticks is None else priceticks
+        # If the market price is 102, the traded price for buy is 102 + slippage.
         slippages = {symbol: 0.01 for symbol in vt_symbols} if slippages is None else slippages
-        sizes = {symbol: 100 for symbol in vt_symbols} if sizes is None else sizes
-        priceticks = {symbol: 0.0001 for symbol in vt_symbols} if priceticks is None else priceticks
+        
 
     # Ensure parameters are provided if symbols were passed directly
     elif not all([rates, slippages, sizes, priceticks]):
@@ -70,32 +75,25 @@ def run_backtesting(
     engine.load_data()
     engine.run_backtesting()
     df = engine.calculate_result()
-    return df
-
-
-def show_portafolio(df):
-    engine = BacktestingEngine()
-    engine.calculate_statistics(df)
-    fig = engine.show_chart(df)
-    fig.show()
+    return engine, df
 
 
 def main():
-    # Removed symbol loading and dynamic dict creation here
 
-    df = run_backtesting(
+    engine, df = run_backtesting(
         strategy_class=IndexExtremeStrategy,
         setting={},
         interval=Interval.DAILY,
-        start=datetime(2017, 1, 2, tzinfo=DB_TZ),
-        end=datetime(2024, 4, 30, tzinfo=DB_TZ),
-        capital=1_000_000,
+        start=datetime(2023, 12, 29, tzinfo=DB_TZ),
+        end=datetime(2024, 12, 31, tzinfo=DB_TZ),
+        capital=IndexExtremeStrategy.CASH_AVAILABLE,
         risk_free=0.02,
         annual_days=240,
     )
 
-    # show_portafolio(df)
-
+    df.to_csv("d:/index_extreme_backtest.csv", index=False)
+    engine.calculate_statistics(df)
+    engine.show_chart(df)
 
 if __name__ == "__main__":
     main()

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from vnpy_portfoliostrategy import StrategyEngine
 from vnpy.trader.object import BarData, TradeData
 from vnpy.trader.database import DB_TZ
+from vnpy.trader.constant import Interval
 from fxincome.backtest.index_strategy import IndexStrategy
 from fxincome import const, logger
 
@@ -82,6 +83,9 @@ class IndexExtremeStrategy(IndexStrategy):
         self.cdb_yc["date"] = pd.to_datetime(self.cdb_yc["date"]).dt.date
         self.cdb_yc.set_index("date", inplace=True)
         conn.close()
+
+        # Counter to skip initial bars loaded in on_init
+        self._bars_loaded_count = 0
 
     def _calculate_position(
         self, spread_pctl, positions, x_idx, y_idx, expert_signal=None
@@ -292,16 +296,27 @@ class IndexExtremeStrategy(IndexStrategy):
             )
 
     def on_init(self) -> None:
-        self.write_log("Initializing backtest...")
-        self.load_bars(1)
+        logger.info("Initializing backtest...")
+        bars_to_skip = 1  # Or read from setting if you make it configurable
+        self._bars_to_skip = bars_to_skip
+        self.load_bars(days=bars_to_skip, interval=Interval.DAILY)
 
     def on_start(self) -> None:
-        self.write_log("Starting backtest...")
+        logger.info("Starting backtest...")
 
     def on_stop(self) -> None:
-        self.write_log("Stopping backtest...")
+        logger.info("Stopping backtest...")
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
+        # Increment the counter for bars received
+        self._bars_loaded_count += 1
+
+        # Skip the initial bars loaded during on_init
+        if self._bars_loaded_count <= self._bars_to_skip:
+            skipped_date = next(iter(bars.values())).datetime.date()
+            logger.info(f"Skipping initial bar for date: {skipped_date}")
+            return
+            
         # Get bonds with sufficient volume(self.min_vol) for trading
         sufficient_volume_bars = {
             symbol: bar for symbol, bar in bars.items() if bar.volume >= self.min_vol
@@ -341,14 +356,14 @@ class IndexExtremeStrategy(IndexStrategy):
             for i in range(3)
         ]
         
-        key_dates = [datetime(2017, 1, 3).date(), datetime(2017, 1, 4).date(), datetime(2024, 4, 26).date(), datetime(2024, 4, 29).date()]
+        key_dates = [datetime(2024, 1, 2).date(), datetime(2024, 1, 3).date(), datetime(2024, 1, 4).date()]
         if today in key_dates:
             logger.info(f"today: {today}")
             for vt_symbol in self.vt_symbols:
                 position = self.get_pos(vt_symbol)
                 if position:
                     logger.info(f"position of {vt_symbol}: {position}")
-
+            logger.info(f"Capital: {self.strategy_engine.capital}")
             logger.info(
                 f"current_positions: [{self.current_positions[0].total_position()}, {self.current_positions[1].total_position()}, {self.current_positions[2].total_position()}]"
             )
@@ -383,7 +398,7 @@ class IndexExtremeStrategy(IndexStrategy):
                     position=delta_sizes[i],
                 )
                 if today in key_dates:
-                    logger.info(f"Tenor[{i}] Buy {symbol} at {buy_price:.4f} with volume {delta_sizes[i]:.0f}")
+                    logger.info(f"Tenor[{i}] Buy {symbol} at {buy_price:} with volume {delta_sizes[i]:.0f}")
             
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
@@ -417,7 +432,7 @@ class IndexExtremeStrategy(IndexStrategy):
                     )
                     
                     if today in key_dates:
-                        logger.info(f"Tenor[{i}] Sell {bond_symbol} at {sell_price:.4f} with volume {amount_to_sell:.0f}")
+                        logger.info(f"Tenor[{i}] Sell {bond_symbol} at {sell_price} with volume {amount_to_sell:.0f}")
                     
                     # Update the position
                     tenor_positions.substract_bond(bond_symbol, amount_to_sell)
@@ -433,8 +448,8 @@ class IndexExtremeStrategy(IndexStrategy):
         Overriding update_trade to log trade details
         """
         super().update_trade(trade)
-        key_dates = [datetime(2017, 1, 3).date(), datetime(2017, 1, 4).date(), datetime(2024, 4, 26).date(), datetime(2024, 4, 29).date()]
+        key_dates = [datetime(2024, 1, 2).date(), datetime(2024, 1, 3).date(), datetime(2024, 1, 4).date()]
         if trade.datetime.date() in key_dates:
             logger.info(
-                f"Trade {trade.direction}: {trade.symbol}, datetime: {trade.datetime.date()}, price: {trade.price:.4f}, volume: {trade.volume:.0f}"
+                f"Trade {trade.direction}: {trade.symbol}, datetime: {trade.datetime.date()}, price: {trade.price}, volume: {trade.volume:.0f}"
             )
