@@ -84,8 +84,19 @@ class IndexExtremeStrategy(IndexStrategy):
         self.cdb_yc.set_index("date", inplace=True)
         conn.close()
 
-        # Counter to skip initial bars loaded in on_init
+        # Store daily average TTMs: list of (date, avg_ttm)
+        self.daily_avg_ttms = []
+
+        # Bars to skip in on_init()
+        self._bars_to_skip = 1
+        # Counter to skip initial bars loaded in on_init()
         self._bars_loaded_count = 0
+        # Key dates for detailed logging
+        self.key_dates = [
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 3).date(),
+            datetime(2024, 1, 4).date(),
+        ]
 
     def _calculate_position(
         self, spread_pctl, positions, x_idx, y_idx, expert_signal=None
@@ -220,7 +231,7 @@ class IndexExtremeStrategy(IndexStrategy):
         Args:
             bars(dict): dict of bars to be selected from
             min_vol(float): minimum volume required for a bond to be considered
-            mode(str): "max_ytm", "max_vol", "match_matu"
+            mode(str): "max_ytm", "max_vol", "match_ttm"
 
         Returns:
             list[BarData]: 3 bars in [7yr, 5yr, 3yr]
@@ -230,7 +241,7 @@ class IndexExtremeStrategy(IndexStrategy):
             # Filter out bonds with low volume.
             if bar.volume < min_vol:
                 continue
-            # Assign bars into 3 lists according to their remaining maturities
+            # Assign bars into 3 lists according to their ttm
             if bar.extra["matu"] >= 6 and bar.extra["matu"] <= 8:
                 bond_bars[0].append(bar)
             elif bar.extra["matu"] >= 4 and bar.extra["matu"] < 6:
@@ -262,8 +273,8 @@ class IndexExtremeStrategy(IndexStrategy):
                 max(bond_bars[1], key=lambda x: x.volume) if bond_bars[1] else None,
                 max(bond_bars[2], key=lambda x: x.volume) if bond_bars[2] else None,
             ]
-        # Find the bond with the closest remaining maturity to the target maturities.
-        elif mode == "match_matu":
+        # Find the bond with the closest ttm to the target ttm.
+        elif mode == "match_ttm":
             return [
                 (
                     min(
@@ -292,20 +303,94 @@ class IndexExtremeStrategy(IndexStrategy):
             ]
         else:
             raise ValueError(
-                f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_matu'."
+                f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_ttm'."
             )
 
     def on_init(self) -> None:
         logger.info("Initializing backtest...")
-        bars_to_skip = 1  # Or read from setting if you make it configurable
-        self._bars_to_skip = bars_to_skip
-        self.load_bars(days=bars_to_skip, interval=Interval.DAILY)
+        # The first a few bars are used for initialization and not for trading.
+        self.load_bars(days=self._bars_to_skip, interval=Interval.DAILY)
 
     def on_start(self) -> None:
         logger.info("Starting backtest...")
 
     def on_stop(self) -> None:
         logger.info("Stopping backtest...")
+
+        # Calculate overall time-weighted average TTM
+        if not self.daily_avg_ttms:
+            logger.info("No daily TTM data recorded to calculate overall average.")
+            return
+
+        total_weighted_ttm_sum = 0.0
+        total_duration = 0
+
+        # Iterate up to the second to last element
+        for i in range(len(self.daily_avg_ttms) - 1):
+            date_i, ttm_i = self.daily_avg_ttms[i]
+            date_next, _ = self.daily_avg_ttms[i+1]
+            # Duration is the number of calendar days the position was held
+            duration = (date_next - date_i).days
+            if duration <= 0: # Should not happen in a chronological backtest
+                logger.warning(f"Non-positive duration {duration} found between {date_i} and {date_next}. Skipping.")
+                continue
+            total_weighted_ttm_sum += ttm_i * duration
+            total_duration += duration
+
+        # Add the last day's contribution, assuming it's held for 1 day
+        _, ttm_last = self.daily_avg_ttms[-1]
+        duration_last = 1
+        total_weighted_ttm_sum += ttm_last * duration_last
+        total_duration += duration_last
+
+        if total_duration > 0:
+            overall_average_ttm = total_weighted_ttm_sum / total_duration
+            logger.info(f"Overall Time-Weighted Average Portfolio TTM: {overall_average_ttm:.2f} years")
+        else:
+            logger.info("Could not calculate overall average TTM (total duration is zero).")
+
+    def _calculate_avg_ttm(self, bars: dict[str, BarData]) -> float:
+        """Calculate the weighted average ttm of the current portfolio."""
+        total_value = 0.0
+        weighted_ttm_sum = 0.0
+
+        for tenor_pos in self.current_positions:
+            for bond_pos in tenor_pos.positions:
+                symbol = bond_pos.symbol
+                if symbol in bars:
+                    bar = bars[symbol]
+                    position_size = bond_pos.position
+                    # Use close price for value weighting
+                    value = position_size * bar.close_price
+                    total_value += value
+                    weighted_ttm_sum += value * bar.extra["matu"]
+
+        if total_value > 0:
+            return weighted_ttm_sum / total_value
+        else:
+            return 0.0 # Return 0 if portfolio is empty or has no ttm data
+
+    def _log_key_dates_positions(
+        self,
+        today: datetime.date,
+        target_positions: list[float],
+        delta_sizes: list[float],
+        avg_ttm: float,
+    ) -> None:
+        logger.info("----Daily Positions----")
+        logger.info(f"today: {today}")
+        for vt_symbol in self.vt_symbols:
+            position = self.get_pos(vt_symbol)
+            if position:
+                logger.info(f"position of {vt_symbol}: {position}")
+        logger.info(f"Capital: {self.strategy_engine.capital}")
+        logger.info(
+            f"current_positions: [{self.current_positions[0].total_position()}, {self.current_positions[1].total_position()}, {self.current_positions[2].total_position()}]"
+        )
+        logger.info(f"target_positions: {target_positions}")
+        logger.info(f"delta_sizes: {delta_sizes}")
+        logger.info(f"Average Portfolio TTM: {avg_ttm:.2f} years")
+        logger.info("----End of Daily Positions----")
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
         # Increment the counter for bars received
@@ -314,9 +399,9 @@ class IndexExtremeStrategy(IndexStrategy):
         # Skip the initial bars loaded during on_init
         if self._bars_loaded_count <= self._bars_to_skip:
             skipped_date = next(iter(bars.values())).datetime.date()
-            logger.info(f"Skipping initial bar for date: {skipped_date}")
+            logger.info(f"Skip initial bar for date: {skipped_date}")
             return
-            
+
         # Get bonds with sufficient volume(self.min_vol) for trading
         sufficient_volume_bars = {
             symbol: bar for symbol, bar in bars.items() if bar.volume >= self.min_vol
@@ -328,9 +413,14 @@ class IndexExtremeStrategy(IndexStrategy):
 
         today = next(iter(sufficient_volume_bars.values())).datetime.date()
 
+        # Calculate average ttm before adjustments for the day
+        avg_ttm = self._calculate_avg_ttm(sufficient_volume_bars)
+        # Record the daily average TTM
+        self.daily_avg_ttms.append((today, avg_ttm))
+
         # Select bonds for 3 positions in [7yr, 5yr, 3yr]
         bond_bars_for_buy = self._select_bonds_for_buy(
-            sufficient_volume_bars, min_vol=self.min_vol, mode="match_matu"
+            sufficient_volume_bars, min_vol=self.min_vol, mode="match_ttm"
         )
 
         # Get 'pctl_avg_53', 'pctl_avg_75', 'pctl_avg_73' for today
@@ -355,21 +445,9 @@ class IndexExtremeStrategy(IndexStrategy):
             target_positions[i] - self.current_positions[i].total_position()
             for i in range(3)
         ]
-        
-        key_dates = [datetime(2024, 1, 2).date(), datetime(2024, 1, 3).date(), datetime(2024, 1, 4).date()]
-        if today in key_dates:
-            logger.info(f"today: {today}")
-            for vt_symbol in self.vt_symbols:
-                position = self.get_pos(vt_symbol)
-                if position:
-                    logger.info(f"position of {vt_symbol}: {position}")
-            logger.info(f"Capital: {self.strategy_engine.capital}")
-            logger.info(
-                f"current_positions: [{self.current_positions[0].total_position()}, {self.current_positions[1].total_position()}, {self.current_positions[2].total_position()}]"
-            )
-            logger.info(f"target_positions: {target_positions}")
-            logger.info(f"delta_sizes: {delta_sizes}")
-            
+
+        if today in self.key_dates:
+            self._log_key_dates_positions(today, target_positions, delta_sizes, avg_ttm)
 
         # Execute trades
         for i in range(3):
@@ -397,9 +475,11 @@ class IndexExtremeStrategy(IndexStrategy):
                     symbol=symbol,
                     position=delta_sizes[i],
                 )
-                if today in key_dates:
-                    logger.info(f"Tenor[{i}] Buy {symbol} at {buy_price:} with volume {delta_sizes[i]:.0f}")
-            
+                if today in self.key_dates:
+                    logger.info(
+                        f"Tenor[{i}] Buy {symbol} at {buy_price:} with volume {delta_sizes[i]:.0f}"
+                    )
+
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
                 # Get all positions for this tenor
@@ -430,10 +510,12 @@ class IndexExtremeStrategy(IndexStrategy):
                         price=sell_price,
                         volume=amount_to_sell,
                     )
-                    
-                    if today in key_dates:
-                        logger.info(f"Tenor[{i}] Sell {bond_symbol} at {sell_price} with volume {amount_to_sell:.0f}")
-                    
+
+                    if today in self.key_dates:
+                        logger.info(
+                            f"Tenor[{i}] Sell {bond_symbol} at {sell_price} with volume {amount_to_sell:.0f}"
+                        )
+
                     # Update the position
                     tenor_positions.substract_bond(bond_symbol, amount_to_sell)
 
@@ -448,8 +530,7 @@ class IndexExtremeStrategy(IndexStrategy):
         Overriding update_trade to log trade details
         """
         super().update_trade(trade)
-        key_dates = [datetime(2024, 1, 2).date(), datetime(2024, 1, 3).date(), datetime(2024, 1, 4).date()]
-        if trade.datetime.date() in key_dates:
+        if trade.datetime.date() in self.key_dates:
             logger.info(
                 f"Trade {trade.direction}: {trade.symbol}, datetime: {trade.datetime.date()}, price: {trade.price}, volume: {trade.volume:.0f}"
-            )
+        )

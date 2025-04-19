@@ -8,7 +8,7 @@ from fxincome import logger
 
 def run_backtesting(
     strategy_class,
-    setting,
+    strat_setting,
     interval,
     start,
     end,
@@ -71,7 +71,7 @@ def run_backtesting(
         risk_free=risk_free,
         annual_days=annual_days,
     )
-    engine.add_strategy(strategy_class, setting)
+    engine.add_strategy(strategy_class, strat_setting)
     engine.load_data()
     engine.run_backtesting()
     df = engine.calculate_result()
@@ -79,10 +79,15 @@ def run_backtesting(
 
 
 def main():
+    strat_setting = {
+        "expert_mode": False,
+        "extreme_low_percentile": -0.10,  # Impossible to reach. Strategy downgrades to normal mode.
+        "extreme_high_percentile": 1.10,  # Impossible to reach. Strategy downgrades to normal mode.
+    }
 
     engine, df = run_backtesting(
         strategy_class=IndexExtremeStrategy,
-        setting={},
+        strat_setting=strat_setting,
         interval=Interval.DAILY,
         start=datetime(2023, 12, 29, tzinfo=DB_TZ),
         end=datetime(2024, 12, 31, tzinfo=DB_TZ),
@@ -91,7 +96,6 @@ def main():
         annual_days=240,
     )
 
-    df.to_csv("d:/index_extreme_backtest.csv", index=False)
     engine.calculate_statistics(df)
     engine.show_chart(df)
 

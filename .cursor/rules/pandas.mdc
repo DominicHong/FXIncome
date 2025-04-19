@@ -9,7 +9,7 @@ globs: *.py
 alwaysApply: false
 ---
 ## Key Principles
-- **Operating System**: Windows.
+- **Path Format**: Windows system path format.
 - **Conciseness and Accuracy**: Write concise, technical responses with accurate Python examples.
 - **Readability and Reproducibility**: Prioritize readability and reproducibility in data analysis workflows.
 - **Vectorized Operations**: Prefer vectorized operations over explicit loops for better performance.
@@ -22,14 +22,15 @@ alwaysApply: false
 ## Data Analysis and Manipulation
 - **Pandas**: Use Pandas for data manipulation and analysis.
 - **Method Chaining**: Prefer method chaining for data transformations when possible.
-- **Data Selection**: Use `loc` and `iloc` for explicit data selection.
-- **Groupby Operations**: Utilize `groupby` operations for efficient data aggregation.
+- **Data Selection**: Use `loc` or `iloc` for explicit data selection.
 
 ## Visualization
 - **Matplotlib**: Use Matplotlib for low-level plotting control and customization.
 - **Seaborn**: Use Seaborn for statistical visualizations and aesthetically pleasing defaults.
 - **Informative Plots**: Create informative and visually appealing plots with proper labels, titles, and legends.
 - **Color Schemes**: Use appropriate color schemes and consider color-blindness accessibility.
+- **Reusable Plotting Functions**: Create reusable plotting functions for consistent visualizations.
+
 
 ## Error Handling and Data Validation
 - **Data Quality Checks**: Implement data quality checks at the beginning of analysis.
@@ -47,21 +48,15 @@ alwaysApply: false
 
 ## Dependencies
 - **Pandas**: For data manipulation and analysis.
-- **NumPy**: For numerical operations.
 - **Matplotlib**: For plotting and visualization.
 - **Seaborn**: For statistical visualizations.
-- **Jupyter**: For interactive computing.
 - **Scikit-learn**: For machine learning tasks.
 
 ## Documentation
 - Document data sources, assumptions, and methodologies clearly.
 - **Add descriptive docstrings** to all Python functions and classes.
 - **Update existing docstrings** if necessary.
-
-## Key Conventions
-- **Data Exploration**: Begin analysis with data exploration and summary statistics.
-- **Reusable Plotting Functions**: Create reusable plotting functions for consistent visualizations.
-- **Version Control**: Use version control (e.g., Git) for tracking changes in notebooks and scripts.
+- **Docstring Style**: Google.
 
 ## References
-Refer to the official documentation of Pandas, Matplotlib, and Jupyter for best practices and up-to-date APIs.
+Refer to the official documentation of Pandas, Matplotlib for best practices and up-to-date APIs.
