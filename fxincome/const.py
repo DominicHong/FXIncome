@@ -374,7 +374,7 @@ class HistorySimilarity:
     SIMI_COSINE: str = "similarity_matrix_cosine.csv"
 
 
-class INDEX_ENHANCEMENT:
+class IndexEnhancement:
     CDB_YC = PATH.MAIN + "strategies_pool/idx_cdb_yield_curve.csv"
     CDB_INFO = PATH.MAIN + "strategies_pool/idx_bond_info.csv"
 

@@ -74,6 +74,7 @@ def run_backtesting(
     engine.add_strategy(strategy_class, strat_setting)
     engine.load_data()
     engine.run_backtesting()
+    engine.strategy.log_overall_avg_ttm()
     df = engine.calculate_result()
     return engine, df
 
@@ -96,6 +97,7 @@ def main():
         annual_days=240,
     )
 
+    df.to_csv("d:/backtest_result.csv", index=True)
     engine.calculate_statistics(df)
     engine.show_chart(df)
 

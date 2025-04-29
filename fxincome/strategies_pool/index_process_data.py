@@ -20,7 +20,7 @@ def process_data(lookback_days: int = 3 * 250):
     conn = sqlite3.connect(const.DB.SQLITE_CONN)
 
     # Load bond information to databse
-    bond_info = pd.read_csv(const.INDEX_ENHANCEMENT.CDB_INFO, encoding="gbk")
+    bond_info = pd.read_csv(const.IndexEnhancement.CDB_INFO, encoding="gbk")
     bond_info.to_sql(
         const.DB.TABLES.IndexEnhancement.CDB_INFO,
         conn,
@@ -29,7 +29,7 @@ def process_data(lookback_days: int = 3 * 250):
     )
 
     # Load yield spread to database
-    cdb_yc = pd.read_csv(const.INDEX_ENHANCEMENT.CDB_YC)
+    cdb_yc = pd.read_csv(const.IndexEnhancement.CDB_YC)
 
     cdb_yc["spread_53"] = cdb_yc.y5 - cdb_yc.y3
     cdb_yc["spread_75"] = cdb_yc.y7 - cdb_yc.y5

@@ -1,52 +1,10 @@
-import pandas as pd
-import sqlite3
 from datetime import datetime
-from dataclasses import dataclass, field
 from vnpy_portfoliostrategy import StrategyEngine
 from vnpy.trader.object import BarData, TradeData
 from vnpy.trader.database import DB_TZ
-from vnpy.trader.constant import Interval
-from fxincome.backtest.index_strategy import IndexStrategy
+
+from fxincome.backtest.index_strategy import IndexStrategy, SymbolPosition, TenorPositions
 from fxincome import const, logger
-
-
-# Symbol = code + exchange. All positions must be >= 0
-@dataclass
-class SymbolPosition:
-    symbol: str
-    position: float
-
-
-@dataclass
-class TenorPositions:
-    positions: list = field(
-        default_factory=list
-    )  # A list of SymbolPosition(symbol, position)
-
-    def total_position(self) -> float:
-        return sum(p.position for p in self.positions)
-
-    def get_position(self, symbol: str) -> float:
-        for p in self.positions:
-            if p.symbol == symbol:
-                return p.position
-        return 0
-
-    def add_bond(self, symbol: str, position: float):
-        for p in self.positions:
-            if p.symbol == symbol:
-                p.position += position
-                break
-        else:
-            self.positions.append(SymbolPosition(symbol, position))
-
-    def substract_bond(self, symbol: str, position: float):
-        for p in self.positions:
-            if p.symbol == symbol:
-                p.position -= position
-                if p.position < 0:
-                    raise ValueError(f"Position for {symbol} is negative: {p.position}")
-                break
 
 
 class IndexExtremeStrategy(IndexStrategy):
@@ -73,29 +31,12 @@ class IndexExtremeStrategy(IndexStrategy):
         self.extreme_low = setting.get("extreme_low_percentile", 0.10)
         self.extreme_high = setting.get("extreme_high_percentile", 0.90)
 
-        # A list of TenorPositions in [7yr, 5yr, 3yr]
-        self.current_positions = [TenorPositions(), TenorPositions(), TenorPositions()]
-
-        conn = sqlite3.connect(const.DB.SQLITE_CONN)
-        cdb_yc_table = const.DB.TABLES.IndexEnhancement.CDB_YC
-        self.cdb_yc = pd.read_sql(f"SELECT * FROM [{cdb_yc_table}]", conn)
-        # Convert date strings to date objects and set as index
-        self.cdb_yc["date"] = pd.to_datetime(self.cdb_yc["date"]).dt.date
-        self.cdb_yc.set_index("date", inplace=True)
-        conn.close()
-
-        # Store daily average TTMs: list of (date, avg_ttm)
-        self.daily_avg_ttms = []
-
-        # Bars to skip in on_init()
-        self._bars_to_skip = 1
-        # Counter to skip initial bars loaded in on_init()
-        self._bars_loaded_count = 0
         # Key dates for detailed logging
         self.key_dates = [
-            datetime(2024, 1, 2).date(),
-            datetime(2024, 1, 3).date(),
-            datetime(2024, 1, 4).date(),
+            datetime(2024, 6, 6).date(),
+            datetime(2024, 6, 7).date(),
+            datetime(2024, 6, 10).date(),
+            datetime(2024, 6, 11).date(),
         ]
 
     def _calculate_position(
@@ -222,175 +163,6 @@ class IndexExtremeStrategy(IndexStrategy):
 
         return positions
 
-    def _select_bonds_for_buy(
-        self, bars: dict[str, BarData], min_vol: float = 1e9, mode: str = "max_ytm"
-    ) -> list[BarData]:
-        """
-        Select bond bars for buying in [7yr, 5yr, 3yr]. Each tenor has only one bond bar.
-
-        Args:
-            bars(dict): dict of bars to be selected from
-            min_vol(float): minimum volume required for a bond to be considered
-            mode(str): "max_ytm", "max_vol", "match_ttm"
-
-        Returns:
-            list[BarData]: 3 bars in [7yr, 5yr, 3yr]
-        """
-        bond_bars = [[], [], []]  # Bond bars candidates for [7yr, 5yr, 3yr]
-        for bar in bars.values():
-            # Filter out bonds with low volume.
-            if bar.volume < min_vol:
-                continue
-            # Assign bars into 3 lists according to their ttm
-            if bar.extra["matu"] >= 6 and bar.extra["matu"] <= 8:
-                bond_bars[0].append(bar)
-            elif bar.extra["matu"] >= 4 and bar.extra["matu"] < 6:
-                bond_bars[1].append(bar)
-            elif bar.extra["matu"] >= 2 and bar.extra["matu"] < 4:
-                bond_bars[2].append(bar)
-
-        if mode == "max_ytm":
-            return [
-                (
-                    max(bond_bars[0], key=lambda x: x.extra["ytm"])
-                    if bond_bars[0]
-                    else None
-                ),
-                (
-                    max(bond_bars[1], key=lambda x: x.extra["ytm"])
-                    if bond_bars[1]
-                    else None
-                ),
-                (
-                    max(bond_bars[2], key=lambda x: x.extra["ytm"])
-                    if bond_bars[2]
-                    else None
-                ),
-            ]
-        elif mode == "max_vol":
-            return [
-                max(bond_bars[0], key=lambda x: x.volume) if bond_bars[0] else None,
-                max(bond_bars[1], key=lambda x: x.volume) if bond_bars[1] else None,
-                max(bond_bars[2], key=lambda x: x.volume) if bond_bars[2] else None,
-            ]
-        # Find the bond with the closest ttm to the target ttm.
-        elif mode == "match_ttm":
-            return [
-                (
-                    min(
-                        bond_bars[0],
-                        key=lambda x: abs(x.extra["matu"] - 7),
-                    )
-                    if bond_bars[0]
-                    else None
-                ),
-                (
-                    min(
-                        bond_bars[1],
-                        key=lambda x: abs(x.extra["matu"] - 5),
-                    )
-                    if bond_bars[1]
-                    else None
-                ),
-                (
-                    min(
-                        bond_bars[2],
-                        key=lambda x: abs(x.extra["matu"] - 3),
-                    )
-                    if bond_bars[2]
-                    else None
-                ),
-            ]
-        else:
-            raise ValueError(
-                f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_ttm'."
-            )
-
-    def on_init(self) -> None:
-        logger.info("Initializing backtest...")
-        # The first a few bars are used for initialization and not for trading.
-        self.load_bars(days=self._bars_to_skip, interval=Interval.DAILY)
-
-    def on_start(self) -> None:
-        logger.info("Starting backtest...")
-
-    def on_stop(self) -> None:
-        logger.info("Stopping backtest...")
-
-        # Calculate overall time-weighted average TTM
-        if not self.daily_avg_ttms:
-            logger.info("No daily TTM data recorded to calculate overall average.")
-            return
-
-        total_weighted_ttm_sum = 0.0
-        total_duration = 0
-
-        # Iterate up to the second to last element
-        for i in range(len(self.daily_avg_ttms) - 1):
-            date_i, ttm_i = self.daily_avg_ttms[i]
-            date_next, _ = self.daily_avg_ttms[i+1]
-            # Duration is the number of calendar days the position was held
-            duration = (date_next - date_i).days
-            if duration <= 0: # Should not happen in a chronological backtest
-                logger.warning(f"Non-positive duration {duration} found between {date_i} and {date_next}. Skipping.")
-                continue
-            total_weighted_ttm_sum += ttm_i * duration
-            total_duration += duration
-
-        # Add the last day's contribution, assuming it's held for 1 day
-        _, ttm_last = self.daily_avg_ttms[-1]
-        duration_last = 1
-        total_weighted_ttm_sum += ttm_last * duration_last
-        total_duration += duration_last
-
-        if total_duration > 0:
-            overall_average_ttm = total_weighted_ttm_sum / total_duration
-            logger.info(f"Overall Time-Weighted Average Portfolio TTM: {overall_average_ttm:.2f} years")
-        else:
-            logger.info("Could not calculate overall average TTM (total duration is zero).")
-
-    def _calculate_avg_ttm(self, bars: dict[str, BarData]) -> float:
-        """Calculate the weighted average ttm of the current portfolio."""
-        total_value = 0.0
-        weighted_ttm_sum = 0.0
-
-        for tenor_pos in self.current_positions:
-            for bond_pos in tenor_pos.positions:
-                symbol = bond_pos.symbol
-                if symbol in bars:
-                    bar = bars[symbol]
-                    position_size = bond_pos.position
-                    # Use close price for value weighting
-                    value = position_size * bar.close_price
-                    total_value += value
-                    weighted_ttm_sum += value * bar.extra["matu"]
-
-        if total_value > 0:
-            return weighted_ttm_sum / total_value
-        else:
-            return 0.0 # Return 0 if portfolio is empty or has no ttm data
-
-    def _log_key_dates_positions(
-        self,
-        today: datetime.date,
-        target_positions: list[float],
-        delta_sizes: list[float],
-        avg_ttm: float,
-    ) -> None:
-        logger.info("----Daily Positions----")
-        logger.info(f"today: {today}")
-        for vt_symbol in self.vt_symbols:
-            position = self.get_pos(vt_symbol)
-            if position:
-                logger.info(f"position of {vt_symbol}: {position}")
-        logger.info(f"Capital: {self.strategy_engine.capital}")
-        logger.info(
-            f"current_positions: [{self.current_positions[0].total_position()}, {self.current_positions[1].total_position()}, {self.current_positions[2].total_position()}]"
-        )
-        logger.info(f"target_positions: {target_positions}")
-        logger.info(f"delta_sizes: {delta_sizes}")
-        logger.info(f"Average Portfolio TTM: {avg_ttm:.2f} years")
-        logger.info("----End of Daily Positions----")
 
     def on_bars(self, bars: dict[str, BarData]) -> None:
         # Increment the counter for bars received
@@ -414,7 +186,7 @@ class IndexExtremeStrategy(IndexStrategy):
         today = next(iter(sufficient_volume_bars.values())).datetime.date()
 
         # Calculate average ttm before adjustments for the day
-        avg_ttm = self._calculate_avg_ttm(sufficient_volume_bars)
+        avg_ttm = self._calculate_avg_ttm(bars)
         # Record the daily average TTM
         self.daily_avg_ttms.append((today, avg_ttm))
 
