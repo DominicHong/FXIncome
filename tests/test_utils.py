@@ -151,9 +151,9 @@ def test_cal_coupon():
 
     # Check period
     chk_start = datetime.date(2025, 2, 24)
-    chk_end = datetime.date(2025, 2, 25) # End date is not included.
+    chk_end = datetime.date(2025, 2, 25) # End date is included.
     
-    expected_coupon = 0  # End date is the payment date but not included in the checking period.
+    expected_coupon = 0.01175  # End date is the payment date and included in the checking period.
 
     actual_coupon = cal_coupon(
         chk_start=chk_start,

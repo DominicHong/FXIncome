@@ -3,7 +3,7 @@ from vnpy_portfoliostrategy import StrategyEngine
 from vnpy.trader.object import BarData, TradeData
 from vnpy.trader.database import DB_TZ
 
-from fxincome.backtest.index_strategy import IndexStrategy, SymbolPosition, TenorPositions
+from fxincome.backtest.index_strategy import IndexStrategy, SymbolPosition, PositionCollection
 from fxincome import const, logger
 
 
@@ -33,11 +33,12 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Key dates for detailed logging
         self.key_dates = [
-            datetime(2024, 6, 6).date(),
-            datetime(2024, 6, 7).date(),
-            datetime(2024, 6, 10).date(),
+            datetime(2024, 1, 2).date(),
+            datetime(2024, 1, 3).date(),
+            datetime(2024, 1, 4).date(),
             datetime(2024, 6, 11).date(),
         ]
+
 
     def _calculate_position(
         self, spread_pctl, positions, x_idx, y_idx, expert_signal=None
@@ -173,22 +174,34 @@ class IndexExtremeStrategy(IndexStrategy):
             skipped_date = next(iter(bars.values())).datetime.date()
             logger.info(f"Skip initial bar for date: {skipped_date}")
             return
+        
+        # Check if the positions held are the same as the tenor positions.
+        if not self._get_positions().same_as_tenor_positions(self.tenor_positions):
+            raise ValueError("Positions held are not the same as the tenor positions.")
+
+        today = next(iter(bars.values())).datetime.date()
+
+        self.daily_positions.append((today, self._get_positions()))
+
+        # Calculate coupon payments from previous date to today and add to self.daily_coupons.
+        # You get payments only if you hold positions on the previous date.
+        self._add_daily_coupon(today)
+
+        # Calculate average ttm before adjustments for today
+        avg_ttm = self._calculate_avg_ttm(bars)
+        # Record the daily average TTM
+        self.daily_avg_ttms.append((today, avg_ttm))
 
         # Get bonds with sufficient volume(self.min_vol) for trading
         sufficient_volume_bars = {
             symbol: bar for symbol, bar in bars.items() if bar.volume >= self.min_vol
         }
-        # if no bond with sufficient volume, skip
+        # if no bond with sufficient volume, positions unchanged
         if not sufficient_volume_bars:
-            logger.info("No valid bond bars found for today. Skipping.")
+            logger.info(
+                f"No bond with sufficient trading volume found at {today}. Positions unchanged."
+            )
             return
-
-        today = next(iter(sufficient_volume_bars.values())).datetime.date()
-
-        # Calculate average ttm before adjustments for the day
-        avg_ttm = self._calculate_avg_ttm(bars)
-        # Record the daily average TTM
-        self.daily_avg_ttms.append((today, avg_ttm))
 
         # Select bonds for 3 positions in [7yr, 5yr, 3yr]
         bond_bars_for_buy = self._select_bonds_for_buy(
@@ -214,7 +227,7 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Calculate size changes for each position
         delta_sizes = [
-            target_positions[i] - self.current_positions[i].total_position()
+            target_positions[i] - self.tenor_positions[i].total_position()
             for i in range(3)
         ]
 
@@ -243,7 +256,7 @@ class IndexExtremeStrategy(IndexStrategy):
                     price=buy_price,
                     volume=delta_sizes[i],
                 )
-                self.current_positions[i].add_bond(
+                self.tenor_positions[i].add_bond(
                     symbol=symbol,
                     position=delta_sizes[i],
                 )
@@ -255,7 +268,7 @@ class IndexExtremeStrategy(IndexStrategy):
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
                 # Get all positions for this tenor
-                tenor_positions = self.current_positions[i]
+                tenor_positions = self.tenor_positions[i]
 
                 # Try to sell from each position until we've sold enough
                 for pos in tenor_positions.positions[
@@ -296,6 +309,8 @@ class IndexExtremeStrategy(IndexStrategy):
                     # If position is now 0, remove it from the list
                     if pos.position == 0:
                         tenor_positions.positions.remove(pos)
+
+        self._prev_date = today
 
     def update_trade(self, trade: TradeData) -> None:
         """

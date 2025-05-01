@@ -147,21 +147,22 @@ def cal_coupon(
     maturity_date: datetime.date,
     coupon: float,
     coupon_freq: int,
-):
+) -> float:
     """
-    Calculate the coupon payment (if any) during a specified period for a bond. 
-    Start date and end date are trade days. Coupon payments may be between them.
+    Calculate the coupon payments (if any) during a specified period for a bond. 
+    Start date and end date are trade days. 
+    One or multiple coupon payments may be between them.
     Bond's tenor must be longer than 1 year.
     
     Args:
         chk_start(datetime.date): The start date of checking period for coupon payment.
-        chk_end(datetime.date): The end date(not included) of checking period for coupon payment.
+        chk_end(datetime.date): The end date of checking period for coupon payment.
         issue_date(datetime.date): The issue date of the bond.
         maturity_date(datetime.date): The maturity date of the bond.
         coupon(float): Coupon rate, 0.025 -> 2.5%
         coupon_freq(int): The number of coupon payments per year. 1 for annual, 2 for semi-annual, 4 for quarterly.
     Returns:
-        c(float): The coupon payment per 100 face value.
+        c(float): The coupon payment per 1 face value.
     """
     if coupon_freq == 1:
         freq_type = FrequencyTypes.ANNUAL
@@ -182,7 +183,7 @@ def cal_coupon(
     c = 0
     # The first date is the issue date, which does not have coupon payment.
     for dt, cf in zip(bond.cpn_dts, bond.flow_amounts):
-        if chk_start <= dt < chk_end:
+        if chk_start <= dt <= chk_end:
             c += cf
     return c
 

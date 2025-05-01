@@ -4,6 +4,7 @@ from vnpy.trader.database import DB_TZ, get_database
 from datetime import datetime
 from index_extreme import IndexExtremeStrategy
 from fxincome import logger
+import pandas as pd  # Add pandas import
 
 
 def run_backtesting(
@@ -96,6 +97,53 @@ def main():
         risk_free=0.02,
         annual_days=240,
     )
+
+    # Incorporate coupon payments received into results
+    daily_coupons_data = engine.strategy.daily_coupons
+    if daily_coupons_data:
+        logger.info("Incorporating daily coupon payments into backtest results...")
+        coupon_s = pd.Series(
+            dict(daily_coupons_data),
+            name="daily_coupon"
+        )
+        coupon_s.index = pd.to_datetime(coupon_s.index)
+        # Convert coupon index to datetime and make timezone-naive
+        if hasattr(coupon_s.index, 'tz') and coupon_s.index.tz is not None:
+             coupon_s.index = coupon_s.index.tz_localize(None) # Make naive
+
+        # Ensure df index is also datetime and timezone-naive
+        try:
+            original_df_index = df.index
+            df.index = pd.to_datetime(df.index)
+            if hasattr(df.index, 'tz') and df.index.tz is not None:
+                 df.index = df.index.tz_localize(None) # Make naive
+        except Exception as e:
+             logger.error(f"Could not convert df.index to naive DatetimeIndex: {e}")
+             # Revert df.index if conversion fails to avoid further issues
+             df.index = original_df_index
+             logger.error(f"df.index type: {type(df.index)}, coupon_s.index type: {type(coupon_s.index)}")
+
+        # Join the dataframes
+        df = df.join(coupon_s, how='left')
+        # Fill NaN values in 'daily_coupon' column
+        df['daily_coupon'] = df['daily_coupon'].fillna(0)
+
+        # Recalculate net_pnl including coupon payments
+        # Assuming df['net_pnl'] is daily pnl *before* coupon payments
+        df['net_pnl'] = df['net_pnl'] + df['daily_coupon']
+
+        # Recalculate balance based on adjusted pnl
+        df['balance'] = engine.capital + df['net_pnl'].cumsum()
+
+        # Recalculate return, highlevel, drawdown, ddpercent
+        df["return"] = (df["balance"] / engine.capital - 1) * 100
+        df["highlevel"] = df["balance"].cummax()
+        df["drawdown"] = df["balance"] - df["highlevel"]
+        df["ddpercent"] = df["drawdown"] / df["highlevel"] * 100
+        logger.info("Coupon payments incorporated.")
+    else:
+        logger.info("No coupon payments data found to incorporate.")
+
 
     df.to_csv("d:/backtest_result.csv", index=True)
     engine.calculate_statistics(df)
