@@ -205,7 +205,7 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Select bonds for 3 positions in [7yr, 5yr, 3yr]
         bond_bars_for_buy = self._select_bonds_for_buy(
-            sufficient_volume_bars, min_vol=self.min_vol, mode="match_ttm"
+            sufficient_volume_bars, min_vol=self.min_vol, mode=self.select_mode
         )
 
         # Get 'pctl_avg_53', 'pctl_avg_75', 'pctl_avg_73' for today
@@ -236,6 +236,7 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Execute trades
         for i in range(3):
+            # Buy
             if delta_sizes[i] > 0:
                 # No bond bar candidate for buying, skip
                 if not bond_bars_for_buy[i]:
@@ -265,6 +266,7 @@ class IndexExtremeStrategy(IndexStrategy):
                         f"Tenor[{i}] Buy {symbol} at {buy_price:} with volume {delta_sizes[i]:.0f}"
                     )
 
+            # Sell randomlly from each tenor until the target is reached.
             elif delta_sizes[i] < 0:
                 remaining_to_sell = abs(delta_sizes[i])
                 # Get all positions for this tenor

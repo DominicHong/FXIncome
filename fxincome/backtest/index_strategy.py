@@ -77,8 +77,9 @@ class IndexStrategy(StrategyTemplate):
 
     # Variables to be shown in the UI
     variables = [
-        "low_percentile",  # Low percentile threshold of spread. Default 25th percentile
-        "high_percentile",  # High percentile threshold of spread. Default 75th percentile
+        "low_percentile",  # Low percentile threshold of spread. Default 25th percentile(0.25)
+        "high_percentile",  # High percentile threshold of spread. Default 75th percentile(0.75)
+        "select_mode",  # Bond for buying selection mode. Default "match_ttm"
         "min_volume",  # Mininum trade volume of a bond to be selected. Default 1 billion
         "lookback_days",  # Period of historical data to be used for analysis. Default 3*250 trade days
     ]
@@ -93,6 +94,7 @@ class IndexStrategy(StrategyTemplate):
         super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
         self.low_pctl = setting.get("low_percentile", 0.25)
         self.high_pctl = setting.get("high_percentile", 0.75)
+        self.select_mode = setting.get("select_mode", "match_ttm")  # "max_ytm", "max_vol", "match_ttm"
         self.min_vol = setting.get("min_volume", 1e9)
         self.lookback_days = setting.get("lookback_days", 3 * 250)
 

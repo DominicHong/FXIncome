@@ -20,7 +20,7 @@ def process_data(lookback_days: int = 3 * 250):
     conn = sqlite3.connect(const.DB.SQLITE_CONN)
 
     # Load bond information to databse
-    bond_info = pd.read_csv(const.IndexEnhancement.CDB_INFO, encoding="gbk")
+    bond_info = pd.read_csv(const.IndexEnhancement.CDB_INFO_PATH, encoding="gbk")
     bond_info.to_sql(
         const.DB.TABLES.IndexEnhancement.CDB_INFO,
         conn,
@@ -29,7 +29,7 @@ def process_data(lookback_days: int = 3 * 250):
     )
 
     # Load yield spread to database
-    cdb_yc = pd.read_csv(const.IndexEnhancement.CDB_YC)
+    cdb_yc = pd.read_csv(const.IndexEnhancement.CDB_YC_PATH)
 
     cdb_yc["spread_53"] = cdb_yc.y5 - cdb_yc.y3
     cdb_yc["spread_75"] = cdb_yc.y7 - cdb_yc.y5
@@ -93,16 +93,13 @@ def process_data(lookback_days: int = 3 * 250):
     return bond_info
 
 
-def load_cdb_ohlc():
-    # Define the directory path
-    directory = r"D:\ProjectRicequant\fxincome\strategies_pool\index_enhancement\cdb_ohlc"
-    
+def load_cdb_ohlc():    
     # Get all CSV files that don't start with 'cashflow'
-    csv_files = [f for f in glob.glob(os.path.join(directory, "*.csv")) 
+    csv_files = [f for f in glob.glob(os.path.join(const.IndexEnhancement.CDB_OHLC_PATH, "*.csv")) 
                  if not os.path.basename(f).startswith("cash_flow")]
     
     if not csv_files:
-        raise ValueError(f"No valid CSV files found in {directory}")
+        raise ValueError(f"No valid CSV files found in {const.IndexEnhancement.CDB_OHLC_PATH}")
     
     bar_count = 0
     # Read each CSV file and add filename as sec_code
@@ -155,5 +152,5 @@ def load_cdb_ohlc():
 
 
 if __name__ == "__main__":
-    # process_data(lookback_days=3 * 250)
-    load_cdb_ohlc()
+    process_data(lookback_days=3 * 250)
+    # load_cdb_ohlc()

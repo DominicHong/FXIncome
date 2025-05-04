@@ -1,9 +1,14 @@
+import os
+
 class PATH:
-    MAIN = "d:/ProjectRicequant/fxincome/"
-    YTM_MODEL = MAIN + "model/ytm/"
-    SPREAD_DATA = MAIN + "spread/"
-    SPREAD_MODEL = MAIN + "model/spread/"
-    STRATEGY_POOL = MAIN + "strategies_pool/"
+    if os.name == 'nt':  # Windows
+        MAIN = "d:/ProjectRicequant/fxincome/"
+    else:  # Mac OS
+        MAIN = "/Users/biyi/Documents/fxincome/"
+    YTM_MODEL = os.path.join(MAIN, "model/ytm/")
+    SPREAD_DATA = os.path.join(MAIN, "spread/")
+    SPREAD_MODEL = os.path.join(MAIN, "model/spread/")
+    STRATEGY_POOL = os.path.join(MAIN, "strategies_pool/")
 
 
 class DB:
@@ -21,20 +26,6 @@ class DB:
         class IndexEnhancement:
             CDB_YC = "strat.idx.cdb_yc"
             CDB_INFO = "strat.idx.cdb_info"
-    
-    # Keeping old structure for backward compatibility (can be removed later)
-    HistorySimilarity_TABLES = {
-        "RAW_FEATURES": TABLES.HistorySimilarity.RAW_FEATURES,
-        "RAW_BACKTEST": TABLES.HistorySimilarity.RAW_BACKTEST,
-        "FEATS_LABELS": TABLES.HistorySimilarity.FEATS_LABELS,
-        "PREDICTIONS": TABLES.HistorySimilarity.PREDICTIONS,
-        "REAL_BACKTEST": TABLES.HistorySimilarity.REAL_BACKTEST,
-    }
-    # Keeping old structure for backward compatibility (can be removed later)
-    IndexEnhancement_TABLES = {
-        "CDB_YC": TABLES.IndexEnhancement.CDB_YC,
-        "CDB_INFO": TABLES.IndexEnhancement.CDB_INFO,
-    }
 
 
 class COUPON_TYPE:
@@ -375,7 +366,10 @@ class HistorySimilarity:
 
 
 class IndexEnhancement:
-    CDB_YC = PATH.MAIN + "strategies_pool/idx_cdb_yield_curve.csv"
-    CDB_INFO = PATH.MAIN + "strategies_pool/idx_bond_info.csv"
-
+    CDB_YC_PATH = os.path.join(PATH.STRATEGY_POOL, "idx_cdb_yield_curve.csv")
+    CDB_INFO_PATH = os.path.join(PATH.STRATEGY_POOL, "idx_bond_info.csv")
+    if os.name == 'nt':  # Windows
+        CDB_OHLC_PATH = os.path.join(PATH.STRATEGY_POOL, "index_enhancement/cdb_ohlc")
+    else:  # Mac OS
+        CDB_OHLC_PATH = os.path.join(PATH.STRATEGY_POOL, "cdb_ohlc")
 

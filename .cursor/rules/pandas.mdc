@@ -1,10 +1,9 @@
 ---
-description: 
+description: General rules for styles, format, and documentation.
 globs: 
 alwaysApply: false
 ---
 ---
-description: Pandas and Scikit-learn Guide
 globs: *.py
 alwaysApply: false
 ---
@@ -20,9 +19,8 @@ alwaysApply: false
 - **Black Formatter Compliance**: Follow Black Formatter style for Python code formatting.
 
 ## Data Analysis and Manipulation
-- **Pandas**: Use Pandas for data manipulation and analysis.
+- **Pandas**: Use **Pandas** for data manipulation and analysis.
 - **Method Chaining**: Prefer method chaining for data transformations when possible.
-- **Data Selection**: Use `loc` or `iloc` for explicit data selection.
 
 ## Visualization
 - **Matplotlib**: Use Matplotlib for low-level plotting control and customization.
@@ -30,7 +28,6 @@ alwaysApply: false
 - **Informative Plots**: Create informative and visually appealing plots with proper labels, titles, and legends.
 - **Color Schemes**: Use appropriate color schemes and consider color-blindness accessibility.
 - **Reusable Plotting Functions**: Create reusable plotting functions for consistent visualizations.
-
 
 ## Error Handling and Data Validation
 - **Data Quality Checks**: Implement data quality checks at the beginning of analysis.

@@ -11,3 +11,4 @@
 /__pycache__/
 /fxincome/strategies_pool/__pycache__/
 FXIncome.code-workspace
+.DS_Store
