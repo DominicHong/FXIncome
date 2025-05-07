@@ -197,8 +197,7 @@ class IndexStrategy(StrategyTemplate):
             )
             total_coupon += paid_coupon # Accumulate coupon for this bond
 
-        if total_coupon > 0:
-            self.daily_coupons.append((today, total_coupon))
+        self.record_cashflow(total_coupon, "coupon")
 
         return total_coupon
 

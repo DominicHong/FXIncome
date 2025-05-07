@@ -171,7 +171,7 @@ class IndexExtremeStrategy(IndexStrategy):
 
         # Skip the initial bars loaded during on_init
         if self._bars_loaded_count <= self._bars_to_skip:
-            skipped_date = next(iter(bars.values())).datetime.date()
+            skipped_date = self.strategy_engine.datetime.date()
             logger.info(f"Skip initial bar for date: {skipped_date}")
             return
         
@@ -179,7 +179,7 @@ class IndexExtremeStrategy(IndexStrategy):
         if not self._get_positions().same_as_tenor_positions(self.tenor_positions):
             raise ValueError("Positions held are not the same as the tenor positions.")
 
-        today = next(iter(bars.values())).datetime.date()
+        today = self.strategy_engine.datetime.date()
 
         self.daily_positions.append((today, self._get_positions()))
 
