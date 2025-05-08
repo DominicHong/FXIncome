@@ -131,7 +131,7 @@ def load_cdb_ohlc():
                     )
                     bar.extra = {
                         "ytm": float(row["ytm"]),
-                        "matu": float(row["matu"]),
+                        "ttm": float(row["matu"]),
                         "out_bal": float(row["out_bal"]),
                     }
                     
@@ -152,5 +152,5 @@ def load_cdb_ohlc():
 
 
 if __name__ == "__main__":
-    process_data(lookback_days=3 * 250)
-    # load_cdb_ohlc()
+    # process_data(lookback_days=3 * 250)
+    load_cdb_ohlc()

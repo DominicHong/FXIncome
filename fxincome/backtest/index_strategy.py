@@ -221,11 +221,11 @@ class IndexStrategy(StrategyTemplate):
             if bar.volume < min_vol:
                 continue
             # Assign bars into 3 lists according to their ttm
-            if bar.extra["matu"] >= 6 and bar.extra["matu"] <= 8:
+            if bar.extra["ttm"] >= 6 and bar.extra["ttm"] <= 8:
                 bond_bars[0].append(bar)
-            elif bar.extra["matu"] >= 4 and bar.extra["matu"] < 6:
+            elif bar.extra["ttm"] >= 4 and bar.extra["ttm"] < 6:
                 bond_bars[1].append(bar)
-            elif bar.extra["matu"] >= 2 and bar.extra["matu"] < 4:
+            elif bar.extra["ttm"] >= 2 and bar.extra["ttm"] < 4:
                 bond_bars[2].append(bar)
 
         if mode == "max_ytm":
@@ -258,7 +258,7 @@ class IndexStrategy(StrategyTemplate):
                 (
                     min(
                         bond_bars[0],
-                        key=lambda x: abs(x.extra["matu"] - 7),
+                        key=lambda x: abs(x.extra["ttm"] - 7),
                     )
                     if bond_bars[0]
                     else None
@@ -266,7 +266,7 @@ class IndexStrategy(StrategyTemplate):
                 (
                     min(
                         bond_bars[1],
-                        key=lambda x: abs(x.extra["matu"] - 5),
+                        key=lambda x: abs(x.extra["ttm"] - 5),
                     )
                     if bond_bars[1]
                     else None
@@ -274,7 +274,7 @@ class IndexStrategy(StrategyTemplate):
                 (
                     min(
                         bond_bars[2],
-                        key=lambda x: abs(x.extra["matu"] - 3),
+                        key=lambda x: abs(x.extra["ttm"] - 3),
                     )
                     if bond_bars[2]
                     else None
@@ -337,7 +337,7 @@ class IndexStrategy(StrategyTemplate):
                 # Use close price for value weighting
                 value = position_size * bar.close_price
                 total_value += value
-                weighted_ttm_sum += value * bar.extra["matu"]
+                weighted_ttm_sum += value * bar.extra["ttm"]
 
         if total_value > 0:
             return weighted_ttm_sum / total_value
