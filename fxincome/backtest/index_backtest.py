@@ -2,6 +2,7 @@ from vnpy_portfoliostrategy.backtesting import BacktestingEngine
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.database import DB_TZ, get_database
 from datetime import datetime
+from index_strategy import IndexStrategy, ThresholdConfig
 from index_extreme import IndexExtremeStrategy
 from fxincome import logger, const
 import pandas as pd
@@ -91,10 +92,13 @@ def run_backtesting(
 
 def main():
     strat_setting = {
-        "expert_mode": False,
         "select_mode": "max_ytm",
-        "extreme_low_percentile": -0.10,  # Impossible to reach. Strategy downgrades to normal mode.
-        "extreme_high_percentile": 1.10,  # Impossible to reach. Strategy downgrades to normal mode.
+        "threshold_type": ThresholdConfig.Type.AVG_PCTL,  # Use average percentile thresholds
+        "low_threshold": 0.25,
+        "high_threshold": 0.75,
+        "expert_mode": False,
+        "extreme_low_threshold": -0.10,
+        "extreme_high_threshold": 1.90,
     }
 
     engine, df = run_backtesting(

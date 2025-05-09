@@ -1,8 +1,9 @@
 import pandas as pd
-import numpy as np
 import datetime
 import sqlite3
 import bisect
+from enum import Enum
+from typing import Optional
 
 from vnpy_portfoliostrategy import StrategyTemplate, StrategyEngine
 from vnpy.trader.object import BarData, TradeData
@@ -65,6 +66,136 @@ class PositionCollection:
         )
 
 
+class ThresholdConfig:
+    """Configuration for thresholds with built-in types and validation."""
+    
+    class Type(Enum):
+        """Types of thresholds supported by the strategy."""
+        AVG_PCTL = "avg_pctl"  # Percentile of normalization by 'average' method
+        ZSCORE = "zscore"      # Z-score thresholds
+        ORI_PCTL = "ori_pctl"  # Original percentile
+
+        def __eq__(self, other):
+            # Check if 'other' is an Enum instance first.
+            if not isinstance(other, Enum):
+                return NotImplemented
+            
+            # Compare based on the class name and the member's value.
+            # This handles cases where enum instances might be from different
+            # module loads but are conceptually the same.
+            if self.__class__.__name__ == other.__class__.__name__:
+                return self.value == other.value
+            
+            return NotImplemented
+
+    def __init__(
+        self,
+        threshold_type: Type,
+        low: float,
+        high: float,
+        extreme_low: Optional[float] = None,
+        extreme_high: Optional[float] = None,
+    ):
+        """
+        Initialize threshold configuration.
+
+        Args:
+            threshold_type (Type enum): Type of threshold 
+            low: Low threshold value
+            high: High threshold value
+            extreme_low: Optional extreme low threshold value
+            extreme_high: Optional extreme high threshold value
+        """
+        self.type = threshold_type
+        self.low = low
+        self.high = high
+        self.extreme_low = extreme_low
+        self.extreme_high = extreme_high
+
+        self._validate()
+
+    def _validate(self):
+        """Validate threshold values."""
+        if self.low >= self.high:
+            raise ValueError(f"low threshold ({self.low}) must be less than high threshold ({self.high})")
+        
+        if self.extreme_low is not None and self.extreme_low >= self.low:
+            raise ValueError(f"extreme_low threshold ({self.extreme_low}) must be less than low threshold ({self.low})")
+        
+        if self.extreme_high is not None and self.extreme_high <= self.high:
+            raise ValueError(f"extreme_high threshold ({self.extreme_high}) must be greater than high threshold ({self.high})")
+
+    @classmethod
+    def avg_pctl(cls) -> 'ThresholdConfig':
+        """Create a default average percentile threshold configuration."""
+        return cls(
+            threshold_type=cls.Type.AVG_PCTL,
+            low=0.25,
+            high=0.75,
+            extreme_low=0.10,
+            extreme_high=0.90
+        )
+
+    @classmethod
+    def zscore(cls) -> 'ThresholdConfig':
+        """Create a default z-score threshold configuration."""
+        return cls(
+            threshold_type=cls.Type.ZSCORE,
+            low=-0.67,  # Approximately 25th percentile
+            high=0.67,  # Approximately 75th percentile
+            extreme_low=-1.28,  # Approximately 10th percentile
+            extreme_high=1.28   # Approximately 90th percentile
+        )
+
+    @classmethod
+    def ori_pctl(cls) -> 'ThresholdConfig':
+        """Create a default original percentile threshold configuration."""
+        return cls(
+            threshold_type=cls.Type.ORI_PCTL,
+            low=0.25,
+            high=0.75,
+            extreme_low=0.10,
+            extreme_high=0.90
+        )
+
+    @classmethod
+    def from_settings(cls, settings: dict) -> 'ThresholdConfig':
+        """
+        Create a threshold configuration from settings dictionary.
+        
+        Args:
+            settings: Dictionary containing threshold settings
+                     Must include 'threshold_type' and optionally threshold values
+        """
+        threshold_type = settings.get("threshold_type", cls.Type.AVG_PCTL)
+
+        if threshold_type == cls.Type.AVG_PCTL:
+            config = cls.avg_pctl()
+        elif threshold_type == cls.Type.ZSCORE:
+            config = cls.zscore()
+        elif threshold_type == cls.Type.ORI_PCTL:
+            config = cls.ori_pctl()
+        else:
+            raise ValueError(
+                f"Invalid threshold_type : '{threshold_type}'. "
+            )
+
+        # Override default values if provided in settings
+        if "low_threshold" in settings:
+            config.low = settings["low_threshold"]
+        if "high_threshold" in settings:
+            config.high = settings["high_threshold"]
+        if "extreme_low_threshold" in settings:
+            config.extreme_low = settings["extreme_low_threshold"]
+        if "extreme_high_threshold" in settings:
+            config.extreme_high = settings["extreme_high_threshold"]
+
+        # Revalidate after potential overrides
+        config._validate()
+        return config
+
+
+
 class IndexStrategy(StrategyTemplate):
 
     TOTAL_SIZE = 6e6  # Bond Size. 100 face value per unit size. 6 million size -> 600 million face value.
@@ -77,8 +208,7 @@ class IndexStrategy(StrategyTemplate):
 
     # Variables to be shown in the UI
     variables = [
-        "low_percentile",  # Low percentile threshold of spread. Default 25th percentile(0.25)
-        "high_percentile",  # High percentile threshold of spread. Default 75th percentile(0.75)
+        "threshold_type",  # Type of thresholds to use (avg_pctl, zscore, ori_pctl)
         "select_mode",  # Bond for buying selection mode. Default "match_ttm"
         "min_volume",  # Mininum trade volume of a bond to be selected. Default 1 billion
         "lookback_days",  # Period of historical data to be used for analysis. Default 3*250 trade days
@@ -92,9 +222,19 @@ class IndexStrategy(StrategyTemplate):
         setting: dict,
     ):
         super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
-        self.low_pctl = setting.get("low_percentile", 0.25)
-        self.high_pctl = setting.get("high_percentile", 0.75)
-        self.select_mode = setting.get("select_mode", "match_ttm")  # "max_ytm", "max_vol", "match_ttm"
+        
+        # Initialize threshold configuration from settings
+        # example settings = {
+        #     "threshold_type": ThresholdConfig.Type.AVG_PCTL,
+        #     "low_threshold": 0.25,
+        #     "high_threshold": 0.75,
+        #     "extreme_low_threshold": 0.10,
+        #     "extreme_high_threshold": 0.90
+        # }
+        self.threshold = ThresholdConfig.from_settings(setting)
+        
+        # Select bonds to buy. Mode: "max_ytm", "max_vol", "match_ttm"
+        self.select_mode = setting.get("select_mode", "match_ttm")
         self.min_vol = setting.get("min_volume", 1e9)
         self.lookback_days = setting.get("lookback_days", 3 * 250)
 
@@ -104,6 +244,10 @@ class IndexStrategy(StrategyTemplate):
             PositionCollection(),
             PositionCollection(),
         ]
+
+        # Attributes that might be used by subclasses or moved methods
+        self.expert_mode = False  # Default to normal mode
+        self.key_dates = []  # Default to no key dates for base strategy
 
         conn = sqlite3.connect(const.DB.SQLITE_CONN)
 
@@ -170,7 +314,7 @@ class IndexStrategy(StrategyTemplate):
         # Positions held at previous date does not get payments on previous date.
         prev_date = prev_date + datetime.timedelta(days=1)
 
-        total_coupon = 0.0 
+        total_coupon = 0.0
         for bond_pos in prev_positions.positions:
             symbol = bond_pos.symbol.split(".")[0]  # Remove exchange from symbol
             # Get bond information from sqlite DB.
@@ -191,11 +335,11 @@ class IndexStrategy(StrategyTemplate):
                     today,
                     issue_date,
                     maturity_date,
-                    coupon_rate / 100.0, # Ensure float division
+                    coupon_rate / 100.0,  # Ensure float division
                     coupon_freq,
                 )
             )
-            total_coupon += paid_coupon # Accumulate coupon for this bond
+            total_coupon += paid_coupon  # Accumulate coupon for this bond
 
         self.record_cashflow(total_coupon, "coupon")
 
@@ -373,7 +517,264 @@ class IndexStrategy(StrategyTemplate):
         logger.info(f"Average Portfolio TTM: {avg_ttm:.2f} years")
         logger.info("----End of Daily Positions----")
 
+    def _transform_positions(self, positions: list[float]) -> list[float]:
+        """
+        Transform positions to ensure they are non-negative and sum to TOTAL_POS.
+        """
+        # Ensure all positions are non-negative
+        positions = [max(0, p) for p in positions]
+
+        # Transf positions so that total position is TOTAL_POS.
+        # If total position exceeds TOTAL_POS(normally 6 units), scale proportionally
+        total = sum(positions)
+        if total > self.TOTAL_POS:
+            positions = [p * self.TOTAL_POS / total for p in positions]
+
+        # Round positions to 1 decimal place
+        positions = [round(p, 1) for p in positions]
+
+        # Ensure total equals exactly TOTAL_POS (6.0) with a single adjustment
+        total = sum(positions)
+        if total != self.TOTAL_POS:
+            diff = self.TOTAL_POS - total
+            if diff > 0:
+                # Find the smallest position and add the remaining amount
+                min_idx = positions.index(min(positions))
+                positions[min_idx] = round(positions[min_idx] + diff, 1)
+            else:
+                # Find the largest position and subtract the excess
+                max_idx = positions.index(max(positions))
+                positions[max_idx] = round(
+                    positions[max_idx] + diff, 1
+                )  # diff is negative
+
+        if sum(positions) != self.TOTAL_POS:
+            raise ValueError(
+                f"Total position sum is not equal to TOTAL_POS: {sum(positions)} != {self.TOTAL_POS}"
+            )
+        return positions
+
+
+    def __calculate_position(
+        self, spread_pctl: float, positions: list[float], x_idx: int, y_idx: int
+    ) -> list[float]:
+        """
+        Calculate positions based on spread percentile for "normal mode".
+
+        Args:
+            spread_pctl (float): Percentile of the spread. Spread = longer bond yield - shorter bond yield.
+                                longer bond position is at x_idx, shorter bond position is at y_idx.
+            positions (list): Current positions in [7yr, 5yr, 3yr]
+            x_idx (int): Position index of longer-term bond
+            y_idx (int): Position index of shorter-term bond
+
+        Returns:
+            list (float): Calculated positions in [7yr, 5yr, 3yr]
+        """
+        if spread_pctl <= self.threshold.low:
+            # Low spread, shift to shorter position.
+            positions[y_idx] += 1
+            positions[x_idx] -= 1
+        elif spread_pctl >= self.threshold.high:
+            # High spread, shift to longer position.
+            positions[x_idx] += 1
+            positions[y_idx] -= 1
+
+        # Transform positions to ensure they are non-negative and sum to TOTAL_POS.
+        positions = self._transform_positions(positions)
+        return positions
+
+    def _generate_target_positions(self, today: datetime.date) -> list[float]:
+        """
+        Calculate the final positions based on all three spreads for "normal mode".
+
+        Args:
+            today (datetime.date): Today's date
+
+        Returns:
+            list (float): Final positions [7yr, 5yr, 3yr] in real size
+        """
+
+        # Get 5yr-3yr, 7yr-5yr, 7yr-3yr average spread percentiles for today
+        try:
+            spread_53 = self.cdb_yc.loc[today, "pctl_avg_53"]
+            spread_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
+            spread_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
+        except KeyError:
+            raise ValueError(f"No spread data found for {today}")
+
+        # Initial positions: [7yr, 5yr, 3yr] 2 units each
+        positions = [self.TOTAL_POS / 3, self.TOTAL_POS / 3, self.TOTAL_POS / 3]
+
+        # Apply adjustments in sequence
+        # For 5yr-3yr spread: x_idx=1 (5yr), y_idx=2 (3yr)
+        positions = self.__calculate_position(spread_53, positions, 1, 2)
+
+        # For 7yr-5yr spread: x_idx=0 (7yr), y_idx=1 (5yr)
+        positions = self.__calculate_position(spread_75, positions, 0, 1)
+
+        # For 7yr-3yr spread: x_idx=0 (7yr), y_idx=2 (3yr)
+        positions = self.__calculate_position(spread_73, positions, 0, 2)
+
+        positions = [p * self.TOTAL_SIZE / self.TOTAL_POS for p in positions]
+
+        return positions
+
+    def on_bars(self, bars: dict[str, BarData]) -> None:
+        # Increment the counter for bars received
+        self._bars_loaded_count += 1
+
+        # Skip the initial bars loaded during on_init
+        if self._bars_loaded_count <= self._bars_to_skip:
+            skipped_date = self.strategy_engine.datetime.date()
+            logger.info(f"Skip initial bar for date: {skipped_date}")
+            return
+
+        # Check if the positions held are the same as the tenor positions.
+        if not self._get_positions().same_as_tenor_positions(self.tenor_positions):
+            raise ValueError("Positions held are not the same as the tenor positions.")
+
+        today = self.strategy_engine.datetime.date()
+
+        self.daily_positions.append((today, self._get_positions()))
+
+        # Calculate coupon payments from previous date to today and add to self.daily_coupons.
+        # You get payments only if you hold positions on the previous date.
+        self._add_daily_coupon(today)
+
+        # Calculate average ttm before adjustments for today
+        avg_ttm = self._calculate_avg_ttm(bars)
+        # Record the daily average TTM
+        self.daily_avg_ttms.append((today, avg_ttm))
+
+        # Get bonds with sufficient volume(self.min_vol) for trading
+        sufficient_volume_bars = {
+            symbol: bar for symbol, bar in bars.items() if bar.volume >= self.min_vol
+        }
+        # if no bond with sufficient volume, positions unchanged
+        if not sufficient_volume_bars:
+            logger.info(
+                f"No bond with sufficient trading volume found at {today}. Positions unchanged."
+            )
+            return
+
+        # Select bonds for 3 positions in [7yr, 5yr, 3yr]
+        bond_bars_for_buy = self._select_bonds_for_buy(
+            sufficient_volume_bars, min_vol=self.min_vol, mode=self.select_mode
+        )
+
+        # Calculate positions based on spread.
+        # IndexExtremeStrategy will override _generate_target_positions for its specific logic (e.g. expert_mode).
+        # The base IndexStrategy._generate_target_positions implements "normal mode".
+        target_positions = self._generate_target_positions(today)
+
+        # Calculate size changes for each position
+        delta_sizes = [
+            target_positions[i] - self.tenor_positions[i].total_position()
+            for i in range(3)
+        ]
+
+        if (
+            today in self.key_dates
+        ):  # self.key_dates will be empty for IndexStrategy unless set otherwise
+            self._log_key_dates_positions(today, target_positions, delta_sizes, avg_ttm)
+
+        # Execute trades
+        for i in range(3):
+            # Buy
+            if delta_sizes[i] > 0:
+                # No bond bar candidate for buying, skip
+                if not bond_bars_for_buy[i]:
+                    continue
+
+                # Buy the selected bond
+                symbol = (
+                    bond_bars_for_buy[i].symbol
+                    + "."
+                    + bond_bars_for_buy[i].exchange.value
+                )
+
+                # Buy at 5% above the close price. Normally it will be filled on T+1's open.
+                buy_price = bond_bars_for_buy[i].close_price * 1.05
+
+                self.buy(
+                    vt_symbol=symbol,
+                    price=buy_price,
+                    volume=delta_sizes[i],
+                )
+                self.tenor_positions[i].add_bond(
+                    symbol=symbol,
+                    position=delta_sizes[i],
+                )
+                if today in self.key_dates:
+                    logger.info(
+                        f"Tenor[{i}] Buy {symbol} at {buy_price:} with volume {delta_sizes[i]:.0f}"
+                    )
+
+            # Sell randomlly from each tenor until the target position is reached.
+            elif delta_sizes[i] < 0:
+                remaining_to_sell = abs(delta_sizes[i])
+                # Get all positions for this tenor
+                tenor_positions = self.tenor_positions[i]
+
+                # Try to sell from each position until we've sold enough
+                for pos in tenor_positions.positions[
+                    :
+                ]:  # Make a copy to safely modify while iterating
+
+                    if remaining_to_sell <= 0:
+                        break
+
+                    bond_symbol = pos.symbol
+                    # The bond should have enough trading volume for selling.
+                    bond_bar_for_sale = sufficient_volume_bars.get(bond_symbol, None)
+                    if not bond_bar_for_sale:
+                        logger.warning(
+                            f"Bond {bond_symbol} has insufficient trading volume on {today}. Skipping sell for this bond."
+                        )
+                        continue
+
+                    # Calculate how much we can sell from this position
+                    amount_to_sell = min(remaining_to_sell, pos.position)
+
+                    # Execute the sell order
+                    # Sell at 5% below the close price. Normally it will be filled on T+1's open.
+                    sell_price = bond_bar_for_sale.close_price * 0.95
+                    self.sell(
+                        vt_symbol=bond_symbol,
+                        price=sell_price,
+                        volume=amount_to_sell,
+                    )
+
+                    if today in self.key_dates:
+                        logger.info(
+                            f"Tenor[{i}] Sell {bond_symbol} at {sell_price} with volume {amount_to_sell:.0f}"
+                        )
+
+                    # Update the position
+                    tenor_positions.substract_bond(bond_symbol, amount_to_sell)
+
+                    remaining_to_sell -= amount_to_sell
+
+                    # If position is now 0, remove it from the list
+                    if pos.position == 0:
+                        tenor_positions.positions.remove(pos)
+
+        self._prev_date = today
+
     def on_init(self) -> None:
         logger.info("Initializing backtest...")
         # The first a few bars are used for initialization and not for trading.
         self.load_bars(days=self._bars_to_skip, interval=Interval.DAILY)
+
+    def update_trade(self, trade: TradeData) -> None:
+        """
+        Overriding update_trade to log trade details
+        """
+        super().update_trade(trade)
+        if (
+            trade.datetime.date() in self.key_dates
+        ):  # self.key_dates will be empty for IndexStrategy unless set otherwise
+            logger.info(
+                f"Trade {trade.direction}: {trade.symbol}, datetime: {trade.datetime.date()}, price: {trade.price}, volume: {trade.volume:.0f}"
+            )
