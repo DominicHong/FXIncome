@@ -102,12 +102,12 @@ def main():
     }
 
     engine, df = run_backtesting(
-        strategy_class=IndexExtremeStrategy,
+        strategy_class=IndexStrategy,
         strat_setting=strat_setting,
         interval=Interval.DAILY,
         start=datetime(2024, 7, 2, tzinfo=DB_TZ),
         end=datetime(2024, 12, 31, tzinfo=DB_TZ),
-        capital=IndexExtremeStrategy.CASH_AVAILABLE,
+        capital=IndexStrategy.CASH_AVAILABLE,
         risk_free=0.02,
         annual_days=240,
     )

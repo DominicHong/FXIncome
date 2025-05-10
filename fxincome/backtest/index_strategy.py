@@ -68,24 +68,25 @@ class PositionCollection:
 
 class ThresholdConfig:
     """Configuration for thresholds with built-in types and validation."""
-    
+
     class Type(Enum):
         """Types of thresholds supported by the strategy."""
+
         AVG_PCTL = "avg_pctl"  # Percentile of normalization by 'average' method
-        ZSCORE = "zscore"      # Z-score thresholds
+        ZSCORE = "zscore"  # Z-score thresholds
         ORI_PCTL = "ori_pctl"  # Original percentile
 
         def __eq__(self, other):
             # Check if 'other' is an Enum instance first.
             if not isinstance(other, Enum):
                 return NotImplemented
-            
+
             # Compare based on the class name and the member's value.
             # This handles cases where enum instances might be from different
             # module loads but are conceptually the same.
             if self.__class__.__name__ == other.__class__.__name__:
                 return self.value == other.value
-            
+
             return NotImplemented
 
     def __init__(
@@ -100,7 +101,7 @@ class ThresholdConfig:
         Initialize threshold configuration.
 
         Args:
-            threshold_type (Type enum): Type of threshold 
+            threshold_type (Type enum): Type of threshold
             low: Low threshold value
             high: High threshold value
             extreme_low: Optional extreme low threshold value
@@ -117,52 +118,58 @@ class ThresholdConfig:
     def _validate(self):
         """Validate threshold values."""
         if self.low >= self.high:
-            raise ValueError(f"low threshold ({self.low}) must be less than high threshold ({self.high})")
-        
+            raise ValueError(
+                f"low threshold ({self.low}) must be less than high threshold ({self.high})"
+            )
+
         if self.extreme_low is not None and self.extreme_low >= self.low:
-            raise ValueError(f"extreme_low threshold ({self.extreme_low}) must be less than low threshold ({self.low})")
-        
+            raise ValueError(
+                f"extreme_low threshold ({self.extreme_low}) must be less than low threshold ({self.low})"
+            )
+
         if self.extreme_high is not None and self.extreme_high <= self.high:
-            raise ValueError(f"extreme_high threshold ({self.extreme_high}) must be greater than high threshold ({self.high})")
+            raise ValueError(
+                f"extreme_high threshold ({self.extreme_high}) must be greater than high threshold ({self.high})"
+            )
 
     @classmethod
-    def avg_pctl(cls) -> 'ThresholdConfig':
+    def avg_pctl(cls) -> "ThresholdConfig":
         """Create a default average percentile threshold configuration."""
         return cls(
             threshold_type=cls.Type.AVG_PCTL,
             low=0.25,
             high=0.75,
             extreme_low=0.10,
-            extreme_high=0.90
+            extreme_high=0.90,
         )
 
     @classmethod
-    def zscore(cls) -> 'ThresholdConfig':
+    def zscore(cls) -> "ThresholdConfig":
         """Create a default z-score threshold configuration."""
         return cls(
             threshold_type=cls.Type.ZSCORE,
             low=-0.67,  # Approximately 25th percentile
             high=0.67,  # Approximately 75th percentile
             extreme_low=-1.28,  # Approximately 10th percentile
-            extreme_high=1.28   # Approximately 90th percentile
+            extreme_high=1.28,  # Approximately 90th percentile
         )
 
     @classmethod
-    def ori_pctl(cls) -> 'ThresholdConfig':
+    def ori_pctl(cls) -> "ThresholdConfig":
         """Create a default original percentile threshold configuration."""
         return cls(
             threshold_type=cls.Type.ORI_PCTL,
             low=0.25,
             high=0.75,
             extreme_low=0.10,
-            extreme_high=0.90
+            extreme_high=0.90,
         )
 
     @classmethod
-    def from_settings(cls, settings: dict) -> 'ThresholdConfig':
+    def from_settings(cls, settings: dict) -> "ThresholdConfig":
         """
         Create a threshold configuration from settings dictionary.
-        
+
         Args:
             settings: Dictionary containing threshold settings
                      Must include 'threshold_type' and optionally threshold values
@@ -176,9 +183,7 @@ class ThresholdConfig:
         elif threshold_type == cls.Type.ORI_PCTL:
             config = cls.ori_pctl()
         else:
-            raise ValueError(
-                f"Invalid threshold_type : '{threshold_type}'. "
-            )
+            raise ValueError(f"Invalid threshold_type : '{threshold_type}'. ")
 
         # Override default values if provided in settings
         if "low_threshold" in settings:
@@ -193,7 +198,6 @@ class ThresholdConfig:
         # Revalidate after potential overrides
         config._validate()
         return config
-
 
 
 class IndexStrategy(StrategyTemplate):
@@ -222,7 +226,7 @@ class IndexStrategy(StrategyTemplate):
         setting: dict,
     ):
         super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
-        
+
         # Initialize threshold configuration from settings
         # example settings = {
         #     "threshold_type": ThresholdConfig.Type.AVG_PCTL,
@@ -232,7 +236,7 @@ class IndexStrategy(StrategyTemplate):
         #     "extreme_high_threshold": 0.90
         # }
         self.threshold = ThresholdConfig.from_settings(setting)
-        
+
         # Select bonds to buy. Mode: "max_ytm", "max_vol", "match_ttm"
         self.select_mode = setting.get("select_mode", "match_ttm")
         self.min_vol = setting.get("min_volume", 1e9)
@@ -554,7 +558,6 @@ class IndexStrategy(StrategyTemplate):
             )
         return positions
 
-
     def __calculate_position(
         self, spread_pctl: float, positions: list[float], x_idx: int, y_idx: int
     ) -> list[float]:
@@ -633,6 +636,15 @@ class IndexStrategy(StrategyTemplate):
         # Check if the positions held are the same as the tenor positions.
         if not self._get_positions().same_as_tenor_positions(self.tenor_positions):
             raise ValueError("Positions held are not the same as the tenor positions.")
+        # Check if total position == TOTAL_SIZE. 
+        # The initial posisions are supposedly built completely at 2 days after skipped dates.
+        if (
+            self._get_positions().total_position() != self.TOTAL_SIZE
+            and self._bars_loaded_count >= self._bars_to_skip + 2
+        ):
+            raise ValueError(
+                f"Total position {self._get_positions().total_position()} != TOTAL_SIZE {self.TOTAL_SIZE}"
+            )
 
         today = self.strategy_engine.datetime.date()
 
@@ -679,87 +691,119 @@ class IndexStrategy(StrategyTemplate):
         ):  # self.key_dates will be empty for IndexStrategy unless set otherwise
             self._log_key_dates_positions(today, target_positions, delta_sizes, avg_ttm)
 
-        # Execute trades
+        # Calculate the maximum executable selling and buying sizes
+        max_sell_size = 0
+        max_buy_size = 0
         for i in range(3):
-            # Buy
-            if delta_sizes[i] > 0:
-                # No bond bar candidate for buying, skip
-                if not bond_bars_for_buy[i]:
-                    continue
+            # Calculate maximum executable selling size
+            if delta_sizes[i] < 0:
+                tenor_size_to_sell = abs(delta_sizes[i])
+                tenor_positions = self.tenor_positions[i]
 
-                # Buy the selected bond
+                # Iterate over the bonds in ith tenor
+                for bond in tenor_positions.positions:
+                    # Sold enough for this tenor. Check next tenor.
+                    if tenor_size_to_sell <= 0:
+                        break
+                    # This bond has no sufficient trading volume. Try next bond.
+                    if not sufficient_volume_bars.get(bond.symbol, None):
+                        continue
+
+                    size_to_sell = min(tenor_size_to_sell, bond.position)
+                    max_sell_size += size_to_sell
+                    tenor_size_to_sell -= size_to_sell
+
+            # Calculate maximum executable buying size
+            elif delta_sizes[i] > 0 and bond_bars_for_buy[i]:
+                max_buy_size += delta_sizes[i]
+
+        # Determine the actual executable size (minimum of buying and selling capacity)
+        total_position_delta = self._get_positions().total_position() - self.TOTAL_SIZE
+        if total_position_delta > 0:  # Total positions exceed TOTAL_SIZE. Need to sell
+            remaining_to_sell = min(max_sell_size, total_position_delta)
+            remaining_to_buy = 0
+        elif total_position_delta < 0:  # Total positions are less than TOTAL_SIZE. Need to buy
+            remaining_to_buy = min(max_buy_size, -total_position_delta)
+            remaining_to_sell = 0
+        else: # Buy and sell should be balanced.
+            remaining_to_sell = min(max_buy_size, max_sell_size)
+            remaining_to_buy = min(max_buy_size, max_sell_size)
+
+        # Send trade orders based on the calculated executable sizes
+        # For each tenor, it's either to sell or buy.
+        for i in range(3):
+            # If to sell, sell random bonds in the ith tenor until executable size is reached.
+            if delta_sizes[i] < 0 and remaining_to_sell > 0:
+                tenor_positions = self.tenor_positions[i]
+
+                for bond in tenor_positions.positions[
+                    :
+                ]:  # Make a copy to safely modify while iterating
+                    if (
+                        remaining_to_sell <= 0
+                    ):  # Sold enough. Check next tenor.
+                        break
+
+                    bond_bar_for_sale = sufficient_volume_bars.get(bond.symbol, None)
+                    if (
+                        not bond_bar_for_sale
+                    ):  # This bond has no sufficient trading volume. Try next bond.
+                        continue
+
+                    # Execute the sell order
+                    # Sell at most remaining_to_sell, delta_sizes[i], bond.position
+                    executable_size = min(remaining_to_sell, abs(delta_sizes[i]), bond.position)
+                    # Sell at 5% below the close price. Normally it will be filled on T+1's open.
+                    sell_price = bond_bar_for_sale.close_price * 0.95
+                    
+                    self.sell(
+                        vt_symbol=bond.symbol,
+                        price=sell_price,
+                        volume=executable_size,
+                    )
+
+                    if today in self.key_dates:
+                        logger.info(
+                            f"Tenor[{i}] Sell {bond.symbol} at {sell_price} with volume {executable_size:.0f}"
+                        )
+
+                    # Update the position
+                    tenor_positions.substract_bond(bond.symbol, executable_size)
+
+                    remaining_to_sell -= executable_size
+
+                    # If position is now 0, remove it from the list
+                    if bond.position == 0:
+                        tenor_positions.positions.remove(bond)
+
+            # If to buy, buy the bond from bond_bars_for_buy[i] until executable size is reached.
+            elif delta_sizes[i] > 0 and remaining_to_buy > 0 and bond_bars_for_buy[i]:
                 symbol = (
                     bond_bars_for_buy[i].symbol
                     + "."
                     + bond_bars_for_buy[i].exchange.value
                 )
 
+                # Buy at most remaining_to_buy, delta_sizes[i]
+                executable_size = min(remaining_to_buy, delta_sizes[i])
                 # Buy at 5% above the close price. Normally it will be filled on T+1's open.
                 buy_price = bond_bars_for_buy[i].close_price * 1.05
 
                 self.buy(
                     vt_symbol=symbol,
                     price=buy_price,
-                    volume=delta_sizes[i],
+                    volume=executable_size,
                 )
                 self.tenor_positions[i].add_bond(
                     symbol=symbol,
-                    position=delta_sizes[i],
+                    position=executable_size,
                 )
+
                 if today in self.key_dates:
                     logger.info(
-                        f"Tenor[{i}] Buy {symbol} at {buy_price:} with volume {delta_sizes[i]:.0f}"
+                        f"Tenor[{i}] Buy {symbol} at {buy_price:.2f} with volume {executable_size:.0f}"
                     )
-
-            # Sell randomlly from each tenor until the target position is reached.
-            elif delta_sizes[i] < 0:
-                remaining_to_sell = abs(delta_sizes[i])
-                # Get all positions for this tenor
-                tenor_positions = self.tenor_positions[i]
-
-                # Try to sell from each position until we've sold enough
-                for pos in tenor_positions.positions[
-                    :
-                ]:  # Make a copy to safely modify while iterating
-
-                    if remaining_to_sell <= 0:
-                        break
-
-                    bond_symbol = pos.symbol
-                    # The bond should have enough trading volume for selling.
-                    bond_bar_for_sale = sufficient_volume_bars.get(bond_symbol, None)
-                    if not bond_bar_for_sale:
-                        logger.warning(
-                            f"Bond {bond_symbol} has insufficient trading volume on {today}. Skipping sell for this bond."
-                        )
-                        continue
-
-                    # Calculate how much we can sell from this position
-                    amount_to_sell = min(remaining_to_sell, pos.position)
-
-                    # Execute the sell order
-                    # Sell at 5% below the close price. Normally it will be filled on T+1's open.
-                    sell_price = bond_bar_for_sale.close_price * 0.95
-                    self.sell(
-                        vt_symbol=bond_symbol,
-                        price=sell_price,
-                        volume=amount_to_sell,
-                    )
-
-                    if today in self.key_dates:
-                        logger.info(
-                            f"Tenor[{i}] Sell {bond_symbol} at {sell_price} with volume {amount_to_sell:.0f}"
-                        )
-
-                    # Update the position
-                    tenor_positions.substract_bond(bond_symbol, amount_to_sell)
-
-                    remaining_to_sell -= amount_to_sell
-
-                    # If position is now 0, remove it from the list
-                    if pos.position == 0:
-                        tenor_positions.positions.remove(pos)
-
+                remaining_to_buy -= executable_size
         self._prev_date = today
 
     def on_init(self) -> None:
