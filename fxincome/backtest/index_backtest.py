@@ -85,7 +85,7 @@ def run_backtesting(
     engine.add_strategy(strategy_class, strat_setting)
     engine.load_data()
     engine.run_backtesting()
-    engine.strategy.log_overall_avg_ttm()
+    engine.strategy.on_stop()
     df = engine.calculate_result()
     return engine, df
 

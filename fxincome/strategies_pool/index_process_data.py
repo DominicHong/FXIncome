@@ -29,7 +29,7 @@ def process_data(lookback_days: int = 3 * 250):
     )
 
     # Load yield spread to database
-    cdb_yc = pd.read_csv(const.IndexEnhancement.CDB_YC_PATH)
+    cdb_yc = pd.read_csv(const.IndexEnhancement.CDB_YC_FILE)
 
     cdb_yc["spread_53"] = cdb_yc.y5 - cdb_yc.y3
     cdb_yc["spread_75"] = cdb_yc.y7 - cdb_yc.y5

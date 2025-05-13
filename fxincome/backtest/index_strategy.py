@@ -11,12 +11,28 @@ from vnpy.trader.constant import Interval
 
 from fxincome import const, logger, utils
 from dataclasses import dataclass, field
+from fxincome.backtest.index_logger import BacktestLogger
 
 
 @dataclass
 class SymbolPosition:
     symbol: str  # Symbol = code + exchange. All positions must be >= 0
     position: float
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "symbol": self.symbol,
+            "position": self.position
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SymbolPosition":
+        """Create from dictionary."""
+        return cls(
+            symbol=data["symbol"],
+            position=data["position"]
+        )
 
 
 @dataclass
@@ -63,6 +79,19 @@ class PositionCollection:
             all(pos in tenor_symbol_pos for pos in self.positions)
             and all(pos in self.positions for pos in tenor_symbol_pos)
             and len(self.positions) == len(tenor_symbol_pos)
+        )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "positions": [p.to_dict() for p in self.positions]
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PositionCollection":
+        """Create from dictionary."""
+        return cls(
+            positions=[SymbolPosition.from_dict(p) for p in data["positions"]]
         )
 
 
@@ -251,10 +280,8 @@ class IndexStrategy(StrategyTemplate):
 
         # Attributes that might be used by subclasses or moved methods
         self.expert_mode = False  # Default to normal mode
-        self.key_dates = []  # Default to no key dates for base strategy
 
         conn = sqlite3.connect(const.DB.SQLITE_CONN)
-
         # Get CDB Yield Curve history from sqlite DB.
         cdb_yc_table = const.DB.TABLES.IndexEnhancement.CDB_YC
         self.cdb_yc = pd.read_sql(f"SELECT * FROM [{cdb_yc_table}]", conn)
@@ -275,7 +302,6 @@ class IndexStrategy(StrategyTemplate):
         self.cdb_info["symbol"] = self.cdb_info["wind_code"].str.split(
             ".", expand=True
         )[0]
-
         conn.close()
 
         # Store daily average TTMs: list of (date, avg_ttm)
@@ -290,6 +316,10 @@ class IndexStrategy(StrategyTemplate):
         self._bars_loaded_count = 0
         # Previous date of bar in on_bars()
         self._prev_date: datetime.date = None
+
+        # Initialize the backtest logger
+        self.json_logger = BacktestLogger(const.IndexEnhancement.BACKTEST_LOG_FILE)
+
 
     def _add_daily_coupon(self, today: datetime.date) -> float:
         """
@@ -433,7 +463,7 @@ class IndexStrategy(StrategyTemplate):
                 f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_ttm'."
             )
 
-    def log_overall_avg_ttm(self) -> None:
+    def _log_overall_avg_ttm(self) -> None:
         # Calculate overall time-weighted average TTM
         if not self.daily_avg_ttms:
             logger.info("No daily TTM data recorded to calculate overall average.")
@@ -500,26 +530,6 @@ class IndexStrategy(StrategyTemplate):
                 positions.add_bond(vt_symbol, position)
         return positions
 
-    def _log_key_dates_positions(
-        self,
-        today: datetime.date,
-        target_positions: list[float],
-        delta_sizes: list[float],
-        avg_ttm: float,
-    ) -> None:
-        logger.info("----Daily Positions----")
-        logger.info(f"today: {today}")
-        positions = self._get_positions()
-        for position in positions.positions:  # Iterate over the list attribute
-            logger.info(f"position of {position.symbol}: {position.position}")
-        logger.info(f"Capital: {self.strategy_engine.capital}")
-        logger.info(
-            f"current_positions: [{self.tenor_positions[0].total_position()}, {self.tenor_positions[1].total_position()}, {self.tenor_positions[2].total_position()}]"
-        )
-        logger.info(f"target_positions: {target_positions}")
-        logger.info(f"delta_sizes: {delta_sizes}")
-        logger.info(f"Average Portfolio TTM: {avg_ttm:.2f} years")
-        logger.info("----End of Daily Positions----")
 
     def _transform_positions(self, positions: list[float]) -> list[float]:
         """
@@ -665,9 +675,7 @@ class IndexStrategy(StrategyTemplate):
         }
         # if no bond with sufficient volume, positions unchanged
         if not sufficient_volume_bars:
-            logger.info(
-                f"No bond with sufficient trading volume found at {today}. Positions unchanged."
-            )
+            logger.info(f"No bond with sufficient trading volume found at {today}. Positions unchanged.")
             return
 
         # Select bonds for 3 positions in [7yr, 5yr, 3yr]
@@ -686,10 +694,16 @@ class IndexStrategy(StrategyTemplate):
             for i in range(3)
         ]
 
-        if (
-            today in self.key_dates
-        ):  # self.key_dates will be empty for IndexStrategy unless set otherwise
-            self._log_key_dates_positions(today, target_positions, delta_sizes, avg_ttm)
+        # Log daily positions
+        self.json_logger.log_position_update(
+            date=today,
+            capital=self.strategy_engine.capital,
+            avg_ttm=avg_ttm,
+            tenor_positions=[pos.total_position() for pos in self.tenor_positions],
+            target_positions=target_positions,
+            delta_sizes=delta_sizes,
+            positions=self._get_positions()
+        )
 
         # Calculate the maximum executable selling and buying sizes
         max_sell_size = 0
@@ -736,18 +750,12 @@ class IndexStrategy(StrategyTemplate):
             if delta_sizes[i] < 0 and remaining_to_sell > 0:
                 tenor_positions = self.tenor_positions[i]
 
-                for bond in tenor_positions.positions[
-                    :
-                ]:  # Make a copy to safely modify while iterating
-                    if (
-                        remaining_to_sell <= 0
-                    ):  # Sold enough. Check next tenor.
+                for bond in tenor_positions.positions[:]:  # Make a copy to safely modify while iterating
+                    if remaining_to_sell <= 0:  # Sold enough. Check next tenor.
                         break
 
                     bond_bar_for_sale = sufficient_volume_bars.get(bond.symbol, None)
-                    if (
-                        not bond_bar_for_sale
-                    ):  # This bond has no sufficient trading volume. Try next bond.
+                    if not bond_bar_for_sale:  # This bond has no sufficient trading volume. Try next bond.
                         continue
 
                     # Execute the sell order
@@ -762,14 +770,18 @@ class IndexStrategy(StrategyTemplate):
                         volume=executable_size,
                     )
 
-                    if today in self.key_dates:
-                        logger.info(
-                            f"Tenor[{i}] Sell {bond.symbol} at {sell_price} with volume {executable_size:.0f}"
-                        )
+                    # Log planned trade
+                    self.json_logger.log_planned_trade(
+                        date=today,
+                        action="sell",
+                        tenor=i,
+                        symbol=bond.symbol,
+                        price=sell_price,
+                        volume=executable_size
+                    )
 
                     # Update the position
                     tenor_positions.substract_bond(bond.symbol, executable_size)
-
                     remaining_to_sell -= executable_size
 
                     # If position is now 0, remove it from the list
@@ -799,10 +811,15 @@ class IndexStrategy(StrategyTemplate):
                     position=executable_size,
                 )
 
-                if today in self.key_dates:
-                    logger.info(
-                        f"Tenor[{i}] Buy {symbol} at {buy_price:.2f} with volume {executable_size:.0f}"
-                    )
+                # Log planned trade
+                self.json_logger.log_planned_trade(
+                    date=today,
+                    action="buy",
+                    tenor=i,
+                    symbol=symbol,
+                    price=buy_price,
+                    volume=executable_size
+                )
                 remaining_to_buy -= executable_size
         self._prev_date = today
 
@@ -816,9 +833,20 @@ class IndexStrategy(StrategyTemplate):
         Overriding update_trade to log trade details
         """
         super().update_trade(trade)
-        if (
-            trade.datetime.date() in self.key_dates
-        ):  # self.key_dates will be empty for IndexStrategy unless set otherwise
-            logger.info(
-                f"Trade {trade.direction}: {trade.symbol}, datetime: {trade.datetime.date()}, price: {trade.price}, volume: {trade.volume:.0f}"
-            )
+
+        # Log executed trade
+        self.json_logger.log_executed_trade(
+            date=trade.datetime.date(),
+            direction=trade.direction.name,
+            symbol=trade.symbol,
+            price=trade.price,
+            volume=trade.volume
+        )
+
+    def on_stop(self) -> None:
+        # Save all log entries to file
+        self.json_logger.generate_html_report(const.IndexEnhancement.BACKTEST_LOG_FILE)
+        
+        # Log the overall average TTM
+        self._log_overall_avg_ttm()
+

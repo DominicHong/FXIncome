@@ -366,8 +366,9 @@ class HistorySimilarity:
 
 
 class IndexEnhancement:
-    CDB_YC_PATH = os.path.join(PATH.STRATEGY_POOL, "idx_cdb_yield_curve.csv")
-    CDB_INFO_PATH = os.path.join(PATH.STRATEGY_POOL, "idx_bond_info.csv")
+    CDB_YC_FILE = os.path.join(PATH.STRATEGY_POOL, "idx_cdb_yield_curve.csv")
+    CDB_INFO_FILE = os.path.join(PATH.STRATEGY_POOL, "idx_bond_info.csv")
+    BACKTEST_LOG_FILE = os.path.join(PATH.STRATEGY_POOL, "index_backtest_log.html")
     if os.name == 'nt':  # Windows
         CDB_OHLC_PATH = os.path.join(PATH.STRATEGY_POOL, "index_enhancement/cdb_ohlc")
     else:  # Mac OS

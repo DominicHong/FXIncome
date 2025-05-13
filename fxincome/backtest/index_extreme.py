@@ -28,13 +28,6 @@ class IndexExtremeStrategy(IndexStrategy):
         super().__init__(strategy_engine, strategy_name, vt_symbols, setting)
         self.expert_mode = setting.get("expert_mode", False)
 
-        # Key dates for detailed logging
-        self.key_dates = [
-            datetime(2024, 1, 2).date(),
-            datetime(2024, 1, 3).date(),
-            datetime(2024, 1, 4).date(),
-            datetime(2024, 6, 11).date(),
-        ]
 
     def __calculate_position(
         self,
