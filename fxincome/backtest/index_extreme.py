@@ -101,7 +101,7 @@ class IndexExtremeStrategy(IndexStrategy):
 
     def _generate_target_positions(self, today: datetime.date) -> list[float]:
         """
-        Calculate the final positions based on all three spreads for "normal mode".
+        Calculate the final positions based on all three spreads for "extreme mode".
 
         Args:
             today (datetime.date): Today's date
@@ -118,15 +118,8 @@ class IndexExtremeStrategy(IndexStrategy):
             # This maintains the original behavior where a signal is strictly required in expert mode.
             pass  # This pass means current_expert_signal remains None if expert_mode is True and no explicit signal logic is added here.
 
-        
-        # Get 5yr-3yr, 7yr-5yr, 7yr-3yr average spread percentiles for today
-        try:
-            spread_53 = self.cdb_yc.loc[today, "pctl_avg_53"]
-            spread_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
-            spread_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
-        except KeyError:
-            raise ValueError(f"No spread data found for {today}")
-        
+        spread_53, spread_75, spread_73 = self.get_spreads(today)
+
         # Initial positions: [7yr, 5yr, 3yr] 2 units each
         positions = [self.TOTAL_POS / 3, self.TOTAL_POS / 3, self.TOTAL_POS / 3]
 

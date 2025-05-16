@@ -21,18 +21,12 @@ class SymbolPosition:
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
-            "symbol": self.symbol,
-            "position": self.position
-        }
+        return {"symbol": self.symbol, "position": self.position}
 
     @classmethod
     def from_dict(cls, data: dict) -> "SymbolPosition":
         """Create from dictionary."""
-        return cls(
-            symbol=data["symbol"],
-            position=data["position"]
-        )
+        return cls(symbol=data["symbol"], position=data["position"])
 
 
 @dataclass
@@ -68,31 +62,33 @@ class PositionCollection:
 
     # Check if the positions held are the same as the tenor positions.
     def same_as_tenor_positions(self, tenor_positions: list) -> bool:
-        tenor_symbol_pos: list[SymbolPosition] = []
         # Unravel the tenor positions into a flat list of symbol positions.
+        tenor_symbol_pos: list[SymbolPosition] = []
         for tenor_pos_collection in tenor_positions:
-            tenor_symbol_pos.extend(
-                tenor_pos_collection.positions
-            )  # Use extend to flatten the list
+            tenor_symbol_pos.extend(tenor_pos_collection.positions)
 
-        return (
-            all(pos in tenor_symbol_pos for pos in self.positions)
-            and all(pos in self.positions for pos in tenor_symbol_pos)
-            and len(self.positions) == len(tenor_symbol_pos)
-        )
+        def combine_positions(positions: list[SymbolPosition]) -> dict:
+            pos_dict = {}
+            for p in positions:
+                if p.symbol in pos_dict:
+                    pos_dict[p.symbol] += p.position
+                else:
+                    pos_dict[p.symbol] = p.position
+            return pos_dict
+
+        self_pos_dict = combine_positions(self.positions)
+        tenor_pos_dict = combine_positions(tenor_symbol_pos)
+
+        return self_pos_dict == tenor_pos_dict
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
-        return {
-            "positions": [p.to_dict() for p in self.positions]
-        }
+        return {"positions": [p.to_dict() for p in self.positions]}
 
     @classmethod
     def from_dict(cls, data: dict) -> "PositionCollection":
         """Create from dictionary."""
-        return cls(
-            positions=[SymbolPosition.from_dict(p) for p in data["positions"]]
-        )
+        return cls(positions=[SymbolPosition.from_dict(p) for p in data["positions"]])
 
 
 class ThresholdConfig:
@@ -318,8 +314,7 @@ class IndexStrategy(StrategyTemplate):
         self._prev_date: datetime.date = None
 
         # Initialize the backtest logger
-        self.json_logger = BacktestLogger(const.IndexEnhancement.BACKTEST_LOG_FILE)
-
+        self.json_logger = BacktestLogger()
 
     def _add_daily_coupon(self, today: datetime.date) -> float:
         """
@@ -463,11 +458,11 @@ class IndexStrategy(StrategyTemplate):
                 f"Invalid mode: {mode}. Choose from 'max_ytm', 'max_vol', 'match_ttm'."
             )
 
-    def _log_overall_avg_ttm(self) -> None:
-        # Calculate overall time-weighted average TTM
+    def cal_overall_avg_ttm(self) -> float|None:
+        # Calculate overall time-weighted average TTM after backtest.
         if not self.daily_avg_ttms:
             logger.info("No daily TTM data recorded to calculate overall average.")
-            return
+            return None
 
         total_weighted_ttm_sum = 0.0
         total_duration = 0
@@ -497,11 +492,13 @@ class IndexStrategy(StrategyTemplate):
             logger.info(
                 f"Overall Time-Weighted Average Portfolio TTM: {overall_average_ttm:.2f} years"
             )
+            return overall_average_ttm
         else:
             logger.info(
                 "Could not calculate overall average TTM (total duration is zero)."
             )
-
+            return None
+        
     def _calculate_avg_ttm(self, bars: dict[str, BarData]) -> float:
         """Calculate the weighted average ttm of the current portfolio."""
         total_value = 0.0
@@ -529,7 +526,6 @@ class IndexStrategy(StrategyTemplate):
             if position:
                 positions.add_bond(vt_symbol, position)
         return positions
-
 
     def _transform_positions(self, positions: list[float]) -> list[float]:
         """
@@ -597,6 +593,36 @@ class IndexStrategy(StrategyTemplate):
         positions = self._transform_positions(positions)
         return positions
 
+    def get_spreads(self, today: datetime.date) -> tuple[float, float, float]:
+        """
+        Get 5yr-3yr, 7yr-5yr, 7yr-3yr spread percentiles or spread z-scores for today, depending on self.threshold.type.
+        """
+        if self.threshold.type == ThresholdConfig.Type.AVG_PCTL:
+            try:
+                spread_53 = self.cdb_yc.loc[today, "pctl_avg_53"]
+                spread_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
+                spread_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
+            except KeyError:
+                raise ValueError(f"No average spread percentiles found for {today}")
+        elif self.threshold.type == ThresholdConfig.Type.ZSCORE:
+            try:
+                spread_53 = self.cdb_yc.loc[today, "zscore_53"]
+                spread_75 = self.cdb_yc.loc[today, "zscore_75"]
+                spread_73 = self.cdb_yc.loc[today, "zscore_73"]
+            except KeyError:
+                raise ValueError(f"No spread z-scores found for {today}")
+        elif self.threshold.type == ThresholdConfig.Type.ORI_PCTL:
+            try:
+                spread_53 = self.cdb_yc.loc[today, "pctl_spread_53"]
+                spread_75 = self.cdb_yc.loc[today, "pctl_spread_75"]
+                spread_73 = self.cdb_yc.loc[today, "pctl_spread_73"]
+            except KeyError:
+                raise ValueError(f"No spread percentiles found for {today}")
+        else:
+            raise ValueError(f"Invalid threshold type: {self.threshold.type}")
+
+        return spread_53, spread_75, spread_73
+
     def _generate_target_positions(self, today: datetime.date) -> list[float]:
         """
         Calculate the final positions based on all three spreads for "normal mode".
@@ -608,13 +634,7 @@ class IndexStrategy(StrategyTemplate):
             list (float): Final positions [7yr, 5yr, 3yr] in real size
         """
 
-        # Get 5yr-3yr, 7yr-5yr, 7yr-3yr average spread percentiles for today
-        try:
-            spread_53 = self.cdb_yc.loc[today, "pctl_avg_53"]
-            spread_75 = self.cdb_yc.loc[today, "pctl_avg_75"]
-            spread_73 = self.cdb_yc.loc[today, "pctl_avg_73"]
-        except KeyError:
-            raise ValueError(f"No spread data found for {today}")
+        spread_53, spread_75, spread_73 = self.get_spreads(today)
 
         # Initial positions: [7yr, 5yr, 3yr] 2 units each
         positions = [self.TOTAL_POS / 3, self.TOTAL_POS / 3, self.TOTAL_POS / 3]
@@ -645,8 +665,12 @@ class IndexStrategy(StrategyTemplate):
 
         # Check if the positions held are the same as the tenor positions.
         if not self._get_positions().same_as_tenor_positions(self.tenor_positions):
+            pos_held = self._get_positions()
+            tenor_pos = self.tenor_positions
+            logger.error(f"Positions held are: {pos_held}")
+            logger.error(f"Tenor positions are: {tenor_pos}")
             raise ValueError("Positions held are not the same as the tenor positions.")
-        # Check if total position == TOTAL_SIZE. 
+        # Check if total position == TOTAL_SIZE.
         # The initial posisions are supposedly built completely at 2 days after skipped dates.
         if (
             self._get_positions().total_position() != self.TOTAL_SIZE
@@ -675,7 +699,9 @@ class IndexStrategy(StrategyTemplate):
         }
         # if no bond with sufficient volume, positions unchanged
         if not sufficient_volume_bars:
-            logger.info(f"No bond with sufficient trading volume found at {today}. Positions unchanged.")
+            logger.info(
+                f"No bond with sufficient trading volume found at {today}. Positions unchanged."
+            )
             return
 
         # Select bonds for 3 positions in [7yr, 5yr, 3yr]
@@ -702,9 +728,30 @@ class IndexStrategy(StrategyTemplate):
             tenor_positions=[pos.total_position() for pos in self.tenor_positions],
             target_positions=target_positions,
             delta_sizes=delta_sizes,
-            positions=self._get_positions()
+            positions=self._get_positions(),
         )
 
+        self._execute_trades(
+            today, delta_sizes, bond_bars_for_buy, sufficient_volume_bars
+        )
+        self._prev_date = today
+
+    def _execute_trades(
+        self,
+        today: datetime.date,
+        delta_sizes: list[float],
+        bond_bars_for_buy: list[BarData],
+        sufficient_volume_bars: dict[str, BarData],
+    ) -> None:
+        """
+        Execute trades based on the delta sizes.
+
+        Args:
+            today (datetime.date): Today's date
+            delta_sizes (list): Delta sizes for each tenor
+            bond_bars_for_buy (list): Specific bond bars to buy for each tenor
+            sufficient_volume_bars (dict): Available bond bars with sufficient volume
+        """
         # Calculate the maximum executable selling and buying sizes
         max_sell_size = 0
         max_buy_size = 0
@@ -736,10 +783,12 @@ class IndexStrategy(StrategyTemplate):
         if total_position_delta > 0:  # Total positions exceed TOTAL_SIZE. Need to sell
             remaining_to_sell = min(max_sell_size, total_position_delta)
             remaining_to_buy = 0
-        elif total_position_delta < 0:  # Total positions are less than TOTAL_SIZE. Need to buy
+        elif (
+            total_position_delta < 0
+        ):  # Total positions are less than TOTAL_SIZE. Need to buy
             remaining_to_buy = min(max_buy_size, -total_position_delta)
             remaining_to_sell = 0
-        else: # Buy and sell should be balanced.
+        else:  # Buy and sell should be balanced.
             remaining_to_sell = min(max_buy_size, max_sell_size)
             remaining_to_buy = min(max_buy_size, max_sell_size)
 
@@ -750,20 +799,26 @@ class IndexStrategy(StrategyTemplate):
             if delta_sizes[i] < 0 and remaining_to_sell > 0:
                 tenor_positions = self.tenor_positions[i]
 
-                for bond in tenor_positions.positions[:]:  # Make a copy to safely modify while iterating
+                for bond in tenor_positions.positions[
+                    :
+                ]:  # Make a copy to safely modify while iterating
                     if remaining_to_sell <= 0:  # Sold enough. Check next tenor.
                         break
 
                     bond_bar_for_sale = sufficient_volume_bars.get(bond.symbol, None)
-                    if not bond_bar_for_sale:  # This bond has no sufficient trading volume. Try next bond.
+                    if (
+                        not bond_bar_for_sale
+                    ):  # This bond has no sufficient trading volume. Try next bond.
                         continue
 
                     # Execute the sell order
                     # Sell at most remaining_to_sell, delta_sizes[i], bond.position
-                    executable_size = min(remaining_to_sell, abs(delta_sizes[i]), bond.position)
+                    executable_size = min(
+                        remaining_to_sell, abs(delta_sizes[i]), bond.position
+                    )
                     # Sell at 5% below the close price. Normally it will be filled on T+1's open.
                     sell_price = bond_bar_for_sale.close_price * 0.95
-                    
+
                     self.sell(
                         vt_symbol=bond.symbol,
                         price=sell_price,
@@ -777,7 +832,7 @@ class IndexStrategy(StrategyTemplate):
                         tenor=i,
                         symbol=bond.symbol,
                         price=sell_price,
-                        volume=executable_size
+                        volume=executable_size,
                     )
 
                     # Update the position
@@ -818,10 +873,9 @@ class IndexStrategy(StrategyTemplate):
                     tenor=i,
                     symbol=symbol,
                     price=buy_price,
-                    volume=executable_size
+                    volume=executable_size,
                 )
                 remaining_to_buy -= executable_size
-        self._prev_date = today
 
     def on_init(self) -> None:
         logger.info("Initializing backtest...")
@@ -840,13 +894,10 @@ class IndexStrategy(StrategyTemplate):
             direction=trade.direction.name,
             symbol=trade.symbol,
             price=trade.price,
-            volume=trade.volume
+            volume=trade.volume,
         )
 
     def on_stop(self) -> None:
-        # Save all log entries to file
-        self.json_logger.generate_html_report(const.IndexEnhancement.BACKTEST_LOG_FILE)
-        
-        # Log the overall average TTM
-        self._log_overall_avg_ttm()
 
+        self.json_logger.generate_html_report(const.IndexEnhancement.BACKTEST_LOG_HTML)
+        self.json_logger.generate_json_report(const.IndexEnhancement.BACKTEST_LOG_JSON)

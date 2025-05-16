@@ -9,6 +9,7 @@ import glob
 
 from datetime import datetime
 from fxincome import const, logger
+from ydata_profiling import ProfileReport
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.database import get_database, DB_TZ
 from vnpy.trader.object import BarData
@@ -150,7 +151,53 @@ def load_cdb_ohlc():
     print(f"Successfully saved {bar_count} bars to database")
 
 
+def spread_profile(mode: str = "all"):
+    conn = sqlite3.connect(const.DB.SQLITE_CONN)
+    cdb_yc_table = const.DB.TABLES.IndexEnhancement.CDB_YC
+    cdb_yc = pd.read_sql(f"SELECT * FROM [{cdb_yc_table}]", conn)
+    conn.close()
+
+    if mode == "avg_pctl":
+        cdb_yc = cdb_yc[["pctl_avg_53", "pctl_avg_75", "pctl_avg_73"]]
+    elif mode == "zscore":
+        cdb_yc = cdb_yc[["zscore_53", "zscore_75", "zscore_73"]]
+    elif mode == "ori_pctl":
+        cdb_yc = cdb_yc[["pctl_spread_53", "pctl_spread_75", "pctl_spread_73"]]
+    elif mode == "all":
+        cdb_yc = cdb_yc[["pctl_spread_53", "pctl_spread_75", "pctl_spread_73",
+                         "pctl_avg_53", "pctl_avg_75", "pctl_avg_73",
+                         "zscore_53", "zscore_75", "zscore_73"]]
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
+    
+    profile = ProfileReport(
+        cdb_yc,
+        title=f"{mode} Spread Profile",
+        correlations=None,
+        interactions=None,
+    )
+    profile.to_file(os.path.join(const.PATH.STRATEGY_POOL, f"{mode}_index_spread_profile.html"))
+    
+
+def delete_lines():
+    file_path = "d:/index_backtest_2017-2023.txt"
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+        
+        # Filter out lines containing "Historical data loading completed"
+        filtered_lines = [line for line in lines if "Historical data loading completed" not in line]
+        
+        with open(file_path, 'w', encoding='utf-8') as file:
+            file.writelines(filtered_lines)
+            
+        print(f"Successfully removed historical data loading lines from {file_path}")
+    except Exception as e:
+        print(f"Error processing file: {str(e)}")
+
 
 if __name__ == "__main__":
     # process_data(lookback_days=3 * 250)
-    load_cdb_ohlc()
+    # load_cdb_ohlc()
+    # spread_profile(mode="all")
+    delete_lines()

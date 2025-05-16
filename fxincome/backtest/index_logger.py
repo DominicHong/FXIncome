@@ -22,15 +22,11 @@ class LogEntry:
 class BacktestLogger:
     """A logger class to handle backtest log entries with date-based organization."""
 
-    def __init__(self, log_file_path: str):
+    def __init__(self):
         """
         Initialize the BacktestLogger.
-
-        Args:
-            log_file_path (str): Path to the log file where entries will be saved
         """
-        self.log_file_path = log_file_path
-        self.entries: dict[str, LogEntry] = {}  # date string -> LogEntry
+        self.entries: dict[datetime.date, LogEntry] = {}  # date -> LogEntry
 
     def get_or_create_entry(self, date: datetime.date) -> LogEntry:
         """
@@ -42,10 +38,9 @@ class BacktestLogger:
         Returns:
             LogEntry: The log entry for the given date
         """
-        date_str = date.isoformat()
-        if date_str not in self.entries:
-            self.entries[date_str] = LogEntry(date=date)
-        return self.entries[date_str]
+        if date not in self.entries:
+            self.entries[date] = LogEntry(date=date)
+        return self.entries[date]
 
     def log_position_update(
         self,
@@ -134,6 +129,35 @@ class BacktestLogger:
             "volume": round(volume, 0)
         })
 
+    
+    def generate_json_report(self, output_path: str) -> None:
+        """
+        Generate a JSON report from the log entries.
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+
+        # Prepare entries for JSON serialization
+        entries_list = list(self.entries.values())
+        entries_list.sort(key=lambda x: x.date)
+
+        def entry_to_dict(entry: LogEntry) -> dict:
+            return {
+                'date': entry.date.isoformat(),
+                'capital': entry.capital,
+                'avg_ttm': entry.avg_ttm,
+                'tenor_positions': entry.tenor_positions,
+                'target_positions': entry.target_positions,
+                'delta_sizes': entry.delta_sizes,
+                'positions': entry.positions,
+                'planned_trades': entry.planned_trades,
+                'executed_trades': entry.executed_trades,
+            }
+
+        data = [entry_to_dict(entry) for entry in entries_list]
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def generate_html_report(self, output_path: str) -> None:
         """
