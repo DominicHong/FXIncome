@@ -96,8 +96,18 @@ def run_backtesting(
 def run_multiple_backtesting(start_year: int, end_year: int):
     # Define columns to match the uploaded image
     columns = [
-        "Period", "Spread_Type", "Decision_Mode", "Total_Return", "Annual_Return", "Average_TTM", "Total_Turnover(0.1B)", "Daily_Turnover(0.1B)",
-        "Sharpe", "Max_Drawdown", "Total_Trade_Count", "Total_Days", "Profit:Loss_Days_Ratio"
+        "Period",
+        "Spread_Type",
+        "Decision_Mode",
+        "Total_Return",
+        "Sharpe",
+        "Slippage",  # slippage / original capital
+        "Commission", # commission / original capital
+        "Average_TTM",
+        "Daily_Turnover(0.1B)",
+        "Max_Drawdown",
+        "Total_Trade_Count",
+        "Total_Days",
     ]
     results = []
 
@@ -113,14 +123,14 @@ def run_multiple_backtesting(start_year: int, end_year: int):
                 extreme_high_threshold = 0.90
                 spread_type_str = "AVG_PCTL"
             else:
-                low_threshold = -0.67
-                high_threshold = 0.67
-                extreme_low_threshold = -1.28
-                extreme_high_threshold = 1.28
+                low_threshold = -0.70
+                high_threshold = 0.70
+                extreme_low_threshold = -1.30
+                extreme_high_threshold = 1.30
                 spread_type_str = "ZSCORE"
             strat_setting = {
                 "select_mode": "max_ytm",
-                "threshold_type": tp,  
+                "threshold_type": tp,
                 "low_threshold": low_threshold,
                 "high_threshold": high_threshold,
                 "expert_mode": False,
@@ -139,29 +149,27 @@ def run_multiple_backtesting(start_year: int, end_year: int):
                 annual_days=240,
             )
             stats = engine.calculate_statistics(df, output=False)
-            # Calculate average TTM if available
             avg_ttm = engine.strategy.cal_overall_avg_ttm()
-            # Profit:Loss days ratio
-            profit_days = stats.get("profit_days", nan)
-            loss_days = stats.get("loss_days", nan)
+            slippage = stats.get("total_slippage", nan) / stats.get("capital", nan) * 100
+            commission = stats.get("total_commission", nan) / stats.get("capital", nan) * 100
             total_days = stats.get("total_days", nan)
-            profit_loss_ratio = f"{profit_days}:{loss_days}" if loss_days > 0 else f"{profit_days}:0"
             # Append row
-            results.append([
-                str(year),
-                spread_type_str,
-                "Normal",
-                f"{stats.get('total_return', nan):.2f}%",
-                f"{stats.get('annual_return', nan):.2f}%",
-                f"{avg_ttm:.2f}",
-                f"{stats.get('total_turnover', nan)/1e8:.2f}",
-                f"{stats.get('daily_turnover', nan)/1e8:.2f}",
-                f"{stats.get('sharpe_ratio', nan):.2f}",
-                f"{stats.get('max_ddpercent', nan):.2f}%",
-                int(stats.get('total_trade_count', nan)),
-                int(total_days),
-                profit_loss_ratio
-            ])
+            results.append(
+                [
+                    str(year),
+                    spread_type_str,
+                    "Normal",
+                    f"{stats.get('total_return', nan):.2f}%",
+                    f"{stats.get('sharpe_ratio', nan):.2f}",
+                    f"{slippage:.2f}%",
+                    f"{commission:.2f}%",
+                    f"{avg_ttm:.2f}",
+                    f"{stats.get('daily_turnover', nan)/1e8:.2f}",
+                    f"{stats.get('max_ddpercent', nan):.2f}%",
+                    int(stats.get("total_trade_count", nan)),
+                    int(total_days),
+                ]
+            )
 
             # Extreme mode
             engine, df = run_backtesting(
@@ -176,35 +184,37 @@ def run_multiple_backtesting(start_year: int, end_year: int):
             )
             stats = engine.calculate_statistics(df, output=False)
             avg_ttm = engine.strategy.cal_overall_avg_ttm()
-            profit_days = stats.get("profit_days", nan)
-            loss_days = stats.get("loss_days", nan)
+            slippage = stats.get("total_slippage", nan) / stats.get("capital", nan) * 100
+            commission = stats.get("total_commission", nan) / stats.get("capital", nan) * 100
             total_days = stats.get("total_days", nan)
-            profit_loss_ratio = f"{profit_days}:{loss_days}" if loss_days > 0 else f"{profit_days}:0"
-            results.append([
-                str(year),
-                spread_type_str,
-                "Extreme",
-                f"{stats.get('total_return', nan):.2f}%",
-                f"{stats.get('annual_return', nan):.2f}%",
-                f"{avg_ttm:.2f}",
-                f"{stats.get('total_turnover', nan)/1e8:.2f}",
-                f"{stats.get('daily_turnover', nan)/1e8:.2f}",
-                f"{stats.get('sharpe_ratio', nan):.2f}",
-                f"{stats.get('max_ddpercent', nan):.2f}%",
-                int(stats.get('total_trade_count', nan)),
-                int(total_days),
-                profit_loss_ratio
-            ])
+            results.append(
+                [
+                    str(year),
+                    spread_type_str,
+                    "Extreme",
+                    f"{stats.get('total_return', nan):.2f}%",
+                    f"{stats.get('sharpe_ratio', nan):.2f}",
+                    f"{slippage:.2f}%",
+                    f"{commission:.2f}%",
+                    f"{avg_ttm:.2f}",
+                    f"{stats.get('daily_turnover', nan)/1e8:.2f}",
+                    f"{stats.get('max_ddpercent', nan):.2f}%",
+                    int(stats.get("total_trade_count", nan)),
+                    int(total_days),
+                ]
+            )
 
     stats_df = pd.DataFrame(results, columns=columns)
     # Save to CSV
-    stats_df.to_csv(os.path.join(const.PATH.STRATEGY_POOL, "index_backtest_stats.csv"), index=False)
+    stats_df.to_csv(
+        os.path.join(const.PATH.STRATEGY_POOL, "index_backtest_stats.csv"), index=False
+    )
 
 
 def main():
     strat_setting = {
         "select_mode": "max_ytm",
-        "threshold_type": ThresholdConfig.Type.ZSCORE,  
+        "threshold_type": ThresholdConfig.Type.ZSCORE,
         "low_threshold": -0.67,
         "high_threshold": 0.67,
         "expert_mode": False,
@@ -232,14 +242,16 @@ def main():
     # Process and save trades
     trade_data = []
     for trade_id, trade in engine.trades.items():
-        trade_data.append({
-            "Trade ID": trade_id.split(".")[1],  
-            "Time": trade.datetime.strftime("%Y-%m-%d"),
-            "Symbol": trade.vt_symbol,
-            "Direction": trade.direction.value,
-            "Price": trade.price,
-            "Volume": trade.volume
-        })
+        trade_data.append(
+            {
+                "Trade ID": trade_id.split(".")[1],
+                "Time": trade.datetime.strftime("%Y-%m-%d"),
+                "Symbol": trade.vt_symbol,
+                "Direction": trade.direction.value,
+                "Price": trade.price,
+                "Volume": trade.volume,
+            }
+        )
 
     trades_df = pd.DataFrame(trade_data)
     trades_df.set_index("Trade ID", inplace=True)
@@ -250,4 +262,4 @@ def main():
 
 if __name__ == "__main__":
     # main()
-    run_multiple_backtesting(2017, 2023)
+    run_multiple_backtesting(2017, 2024)
