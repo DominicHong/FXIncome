@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# Import FinancePy classes
 from financepy.products.bonds.bond import Bond, YTMCalcType
 from financepy.utils.date import Date
 from financepy.utils.frequency import FrequencyTypes
@@ -165,7 +164,7 @@ class CallableBondAnalyzer:
         
         # Test range to understand the function
         print("\nTesting different coupon rates:")
-        test_coupons = np.arange(0.03, 0.08, 0.005)
+        test_coupons = np.arange(0.03, 0.08, 0.001)
         test_results = []
         
         for test_coupon in test_coupons:
@@ -254,8 +253,8 @@ def main():
     print("=== Callable Bond Valuation Analysis ===\n")
     
     # Create dates
-    issue_date = Date(1, 1, 2024)
-    maturity_date = Date(1, 1, 2029)  # 5 years
+    issue_date = Date(27, 5, 2025)
+    maturity_date = Date(27, 5, 2030)  # 5 years
     
     # Problem parameters
     risk_free_rate = 0.0435  # 4.35%
@@ -275,16 +274,7 @@ def main():
     )
     print()
     
-    # 2. Validate FinancePy implementation
-    print("=== FinancePy Validation ===")
-    straight_value = analyzer.calculate_straight_bond_value(
-        issue_date, maturity_date, straight_bond_coupon
-    )
-    print(f"Straight bond (4.60% coupon) value: {straight_value:.4f}")
-    print(f"Value > 100 (as expected): {straight_value > 100}")
-    print()
-    
-    # 3. Solve for callable bond coupon
+    # 2. Solve for callable bond coupon
     print("=== Solving for Callable Bond Coupon ===")
     try:
         optimal_coupon, solution_info = analyzer.solve_callable_bond_coupon_analytical(
