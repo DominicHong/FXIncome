@@ -278,14 +278,14 @@ class CallableBondValuer:
             # If end_idx < days_to_cf, it means rate_path is shorter than time to cash flow.
             # The discounting will only cover up to len(rate_path).
             
-            # Continuous Mode:
-            # $\frac{1}{\prod_{i=1}^{n}(1+r_i)^{\Delta t} }$
-            #
             # Discrete Mode:
+            # $\frac{1}{\prod_{i=1}^{n}(1+r_i \cdot \Delta t) }$
+            #
+            # Continuous Mode:
             # $\exp\left(-\sum_{i=1}^{n} r_i \cdot \Delta t\right)$
 
             if discount_mode == "discrete":
-                discount_factor = 1.0 / np.prod((1 + relevant_rates) ** path_dt)
+                discount_factor = 1.0 / np.prod(1 + relevant_rates * path_dt)
             elif discount_mode == "continuous":
                 discount_factor = np.exp(-np.sum(relevant_rates * path_dt))
             else:
@@ -462,6 +462,159 @@ class CallableBondValuer:
         return not_called_bond_value, False, {}
 
 
+def calculate_equivalent_initial_short_rate(
+    straight_bond: Bond,
+    ytm: float,
+    valuation_date: Date,
+    discount_mode: str = "discrete",
+    tolerance: float = 1e-6,
+    max_iterations: int = 50
+) -> tuple[float, dict]:
+    """Calculate equivalent initial short rate for Monte Carlo simulation.
+    
+    This function finds a flat short rate that, when used in the Monte Carlo 
+    discounting framework (_pv_of_future_cash_flows), produces the same present 
+    value as the analytical bond valuation.
+    
+    Args:
+        straight_bond: FinancePy Bond object
+        ytm: Yield to maturity of the bond  
+        valuation_date: Date to value the bond
+        discount_mode: "discrete" or "continuous" discounting mode
+        tolerance: Convergence tolerance for the optimization
+        max_iterations: Maximum number of optimization iterations
+        
+    Returns:
+        Tuple of (equivalent_short_rate, solution_info)
+    """
+    
+    # Get analytical bond price using FinancePy
+    analytical_pv = straight_bond.dirty_price_from_ytm(
+        valuation_date, ytm, YTMCalcType.US_STREET
+    )
+    
+    # Extract bond cash flows and dates
+    bond_cf_dates = straight_bond.cpn_dts
+    bond_cf_amounts = [cf * straight_bond.par for cf in straight_bond.flow_amounts]
+    
+    # Fix: FinancePy doesn't include principal in the final payment, add it manually
+    if (len(bond_cf_dates) > 0 and 
+        bond_cf_dates[-1] == straight_bond.maturity_dt and 
+        len(bond_cf_amounts) > 0):
+        # Check if last payment is just a coupon (needs principal added)
+        expected_coupon = straight_bond.cpn * straight_bond.par
+        if abs(bond_cf_amounts[-1] - expected_coupon) < 0.01:
+            bond_cf_amounts[-1] += straight_bond.par
+    
+    # Create a dummy rate simulator to get the dt parameter
+    # We need this for the _pv_of_future_cash_flows method
+    dummy_simulator = InterestRateSimulator(
+        r0=ytm,  # Initial guess
+        days=365 * 10,  # Sufficient duration for bond maturity
+        num_paths=1,
+        model="gbm"
+    )
+    
+    # Create a dummy callable bond valuer to access _pv_of_future_cash_flows
+    dummy_callable_bond = CallableBond(
+        issue_date=valuation_date,
+        maturity_date=straight_bond.maturity_dt,
+        coupon_rate=straight_bond.cpn,
+        call_protection_years=1,
+        face_value=straight_bond.par
+    )
+    
+    dummy_valuer = CallableBondValuer(dummy_callable_bond, dummy_simulator)
+    
+    def objective_function(flat_rate: float) -> float:
+        """Objective function: difference between MC PV and analytical PV."""
+        
+        # Calculate maximum days needed for discounting
+        max_days_to_maturity = int((straight_bond.maturity_dt - valuation_date)) + 1
+        
+        # Create flat rate path
+        flat_rate_path = np.full(max_days_to_maturity, flat_rate)
+        
+        # Calculate PV using Monte Carlo discounting method
+        mc_pv = dummy_valuer._pv_of_future_cash_flows(
+            bond_cf_dates,
+            bond_cf_amounts,
+            valuation_date,
+            flat_rate_path,
+            discount_mode=discount_mode
+        )
+        
+        return mc_pv - analytical_pv
+    
+    # Test the objective function with the initial guess (YTM)
+    print(f"Testing equivalent short rate calculation...")
+    print(f"Analytical bond PV: {analytical_pv:.6f}")
+    
+    initial_error = objective_function(ytm)
+    print(f"Initial guess ({ytm:.4%}) error: {initial_error:.6f}")
+    
+    # Set up bounds for optimization
+    lower_bound = max(0.0001, ytm - 0.05)  # At least 1bp, YTM - 5%
+    upper_bound = ytm + 0.05  # YTM + 5%
+    
+    # Test bounds
+    f_lower = objective_function(lower_bound)
+    f_upper = objective_function(upper_bound)
+    
+    print(f"f({lower_bound:.4%}) = {f_lower:.6f}")
+    print(f"f({upper_bound:.4%}) = {f_upper:.6f}")
+    
+    # Expand bounds if they don't bracket the root
+    if f_lower * f_upper > 0:
+        if f_lower > 0:  # Both positive, need lower rate
+            lower_bound = max(0.0001, ytm - 0.10)
+        else:  # Both negative, need higher rate  
+            upper_bound = ytm + 0.10
+        
+        f_lower = objective_function(lower_bound)
+        f_upper = objective_function(upper_bound)
+        print(f"Adjusted bounds: f({lower_bound:.4%}) = {f_lower:.6f}, f({upper_bound:.4%}) = {f_upper:.6f}")
+    
+    # Solve for equivalent short rate using Brent's method
+    try:
+        equivalent_rate = optimize.brentq(
+            objective_function,
+            a=lower_bound,
+            b=upper_bound,
+            xtol=tolerance,
+            maxiter=max_iterations
+        )
+        
+        # Calculate final verification
+        max_days_to_maturity = int((straight_bond.maturity_dt - valuation_date)) + 1
+        flat_rate_path = np.full(max_days_to_maturity, equivalent_rate)
+        
+        final_mc_pv = dummy_valuer._pv_of_future_cash_flows(
+            bond_cf_dates,
+            bond_cf_amounts,
+            valuation_date,
+            flat_rate_path,
+            discount_mode=discount_mode
+        )
+        
+        solution_info = {
+            'equivalent_short_rate': equivalent_rate,
+            'analytical_pv': analytical_pv,
+            'mc_pv': final_mc_pv,
+            'error': abs(final_mc_pv - analytical_pv),
+            'relative_error': abs(final_mc_pv - analytical_pv) / analytical_pv,
+            'ytm': ytm,
+            'rate_difference': equivalent_rate - ytm,
+            'discount_mode': discount_mode,
+            'num_cash_flows': len(bond_cf_dates) - 1  # Exclude issue date
+        }
+        
+        return equivalent_rate, solution_info
+        
+    except ValueError as e:
+        raise ValueError(f"Could not find equivalent short rate: {e}")
+
+
 def solve_callable_bond_coupon(
     issue_date: Date,
     maturity_date: Date,
@@ -505,7 +658,7 @@ def solve_callable_bond_coupon(
             mu=0,  # 0 for GBM
             sigma=0.02,  # 2% volatility
             days=365 * 5,  # 5 years
-            num_paths=100,  # Fewer paths for speed during optimization
+            num_paths=1000,  
             model="gbm",
             kappa=0.1
         )
@@ -515,7 +668,7 @@ def solve_callable_bond_coupon(
         
         # Value the bond
         callable_value, straight_value, stats = valuer.value_bond(
-            issue_date, risk_free_rate, num_simulations=100
+            issue_date, risk_free_rate, num_simulations=1000
         )
         
         return callable_value - target_value
@@ -567,11 +720,11 @@ def solve_callable_bond_coupon(
         
         rate_simulator = InterestRateSimulator(
             r0=risk_free_rate,
-            mu=risk_free_rate,
+            mu=0,
             sigma=0.02,
             days=365 * 5,
             num_paths=1000,
-            model="vasicek",
+            model="gbm",
             kappa=0.1
         )
         
@@ -626,11 +779,11 @@ def analyze_callable_bond_dynamics(
         # Create rate simulator
         rate_simulator = InterestRateSimulator(
             r0=risk_free_rate,
-            mu=risk_free_rate,
+            mu=0,
             sigma=0.02,
             days=365 * 5,
-            num_paths=200,
-            model="vasicek",
+            num_paths=1000,
+            model="gbm",
             kappa=0.1
         )
         
@@ -639,186 +792,11 @@ def analyze_callable_bond_dynamics(
         
         # Value the bond
         callable_value, straight_value, stats = valuer.value_bond(
-            issue_date, risk_free_rate, num_simulations=200
+            issue_date, risk_free_rate, num_simulations=1000
         )
         
         print(f"{coupon:8.2%} | {straight_value:11.4f} | {callable_value:11.4f} | "
               f"{stats['option_value']:10.4f} | {stats['call_probability']:.1%}")
-
-
-def simple_callable_bond_solver(
-    issue_date: Date,
-    maturity_date: Date,
-    target_value: float,
-    risk_free_rate: float,
-    straight_bond_coupon: float
-) -> tuple[float, dict]:
-    """Simple approach: find coupon that makes callable bond equal to straight bond value."""
-    
-    # First, get the straight bond value at the given coupon rate
-    straight_bond = CallableBond(
-        issue_date=issue_date,
-        maturity_date=maturity_date,
-        coupon_rate=straight_bond_coupon,
-        freq_type=FrequencyTypes.ANNUAL,
-        day_count_type=DayCountTypes.THIRTY_E_360
-    )
-    
-    straight_bond_value = straight_bond.dirty_price_from_ytm(
-        issue_date, risk_free_rate, YTMCalcType.US_STREET
-    )
-    
-    print(f"Straight bond ({straight_bond_coupon:.2%} coupon) value: {straight_bond_value:.4f}")
-    
-    def objective_function(coupon_rate: float) -> float:
-        """Find callable bond coupon that gives same value as straight bond."""
-        
-        callable_bond = CallableBond(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
-            coupon_rate=coupon_rate,
-            call_protection_years=1,
-            freq_type=FrequencyTypes.ANNUAL,
-            day_count_type=DayCountTypes.THIRTY_E_360
-        )
-        
-        rate_simulator = InterestRateSimulator(
-            r0=risk_free_rate,
-            mu=risk_free_rate,
-            sigma=0.015,  # Lower volatility for more stable results
-            days=365 * 5,
-            num_paths=100,
-            model="vasicek",
-            kappa=0.05  # Slower mean reversion
-        )
-        
-        valuer = CallableBondValuer(callable_bond, rate_simulator)
-        callable_value, _, _ = valuer.value_bond(
-            issue_date, risk_free_rate, num_simulations=100
-        )
-        
-        return callable_value - straight_bond_value
-    
-    # Test a range to find the root
-    print("Testing callable bond values for different coupon rates:")
-    test_coupons = [0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045]
-    
-    for test_coupon in test_coupons:
-        try:
-            obj_val = objective_function(test_coupon)
-            print(f"Coupon {test_coupon:.2%}: Callable - Straight = {obj_val:.4f}")
-        except:
-            print(f"Coupon {test_coupon:.2%}: Error in calculation")
-    
-    # Find the root - based on analysis, we expect the crossover around 2-3%
-    try:
-        # Use the appropriate range where callable > straight transitions to callable < straight
-        optimal_coupon = optimize.brentq(
-            objective_function,
-            a=0.015,  # Lower bound where callable > straight
-            b=0.035,  # Upper bound where callable < straight
-            xtol=1e-4,
-            maxiter=20
-        )
-        
-        # Get final results
-        final_callable_bond = CallableBond(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
-            coupon_rate=optimal_coupon,
-            call_protection_years=1,
-            freq_type=FrequencyTypes.ANNUAL,
-            day_count_type=DayCountTypes.THIRTY_E_360
-        )
-        
-        rate_simulator = InterestRateSimulator(
-            r0=risk_free_rate,
-            mu=risk_free_rate,
-            sigma=0.015,
-            days=365 * 5,
-            num_paths=500,
-            model="vasicek",
-            kappa=0.05
-        )
-        
-        valuer = CallableBondValuer(final_callable_bond, rate_simulator)
-        final_callable_value, final_straight_value, final_stats = valuer.value_bond(
-            issue_date, risk_free_rate, num_simulations=500
-        )
-        
-        solution_info = {
-            'optimal_coupon': optimal_coupon,
-            'callable_bond_value': final_callable_value,
-            'straight_bond_reference_value': straight_bond_value,
-            'straight_bond_at_optimal_coupon': final_straight_value,
-            'target_value': target_value,
-            'error': abs(final_callable_value - straight_bond_value),
-            'option_value': final_stats['option_value'],
-            'call_probability': final_stats['call_probability']
-        }
-        
-        return optimal_coupon, solution_info
-        
-    except Exception as e:
-        print(f"Optimization failed: {e}")
-        # If optimization fails, let's find the closest value manually
-        print("Attempting manual search for best match...")
-        
-        best_coupon = None
-        best_error = float('inf')
-        best_info = {}
-        
-        for test_coupon in np.arange(0.01, 0.10, 0.001):
-            try:
-                obj_val = objective_function(test_coupon)
-                if abs(obj_val) < best_error:
-                    best_error = abs(obj_val)
-                    best_coupon = test_coupon
-                    
-                    # Get detailed info for best match
-                    if best_error < 1.0:  # If reasonable match
-                        callable_bond = CallableBond(
-                            issue_date=issue_date,
-                            maturity_date=maturity_date,
-                            coupon_rate=best_coupon,
-                            call_protection_years=1,
-                            freq_type=FrequencyTypes.ANNUAL,
-                            day_count_type=DayCountTypes.THIRTY_E_360
-                        )
-                        
-                        rate_simulator = InterestRateSimulator(
-                            r0=risk_free_rate,
-                            mu=risk_free_rate,
-                            sigma=0.015,
-                            days=365 * 5,
-                            num_paths=300,
-                            model="vasicek",
-                            kappa=0.05
-                        )
-                        
-                        valuer = CallableBondValuer(callable_bond, rate_simulator)
-                        callable_value, straight_value_at_best, stats = valuer.value_bond(
-                            issue_date, risk_free_rate, num_simulations=300
-                        )
-                        
-                        best_info = {
-                            'optimal_coupon': best_coupon,
-                            'callable_bond_value': callable_value,
-                            'straight_bond_reference_value': straight_bond_value,
-                            'straight_bond_at_optimal_coupon': straight_value_at_best,
-                            'target_value': target_value,
-                            'error': best_error,
-                            'option_value': stats['option_value'],
-                            'call_probability': stats['call_probability']
-                        }
-            except:
-                continue
-        
-        if best_coupon is not None:
-            print(f"Best match found: {best_coupon:.3%} with error: {best_error:.4f}")
-            return best_coupon, best_info
-        else:
-            return None, {}
 
 
 def main():
@@ -830,27 +808,62 @@ def main():
     # Parameters from the problem
     risk_free_rate = 0.0435  # 4.35%
     straight_bond_coupon = 0.046  # 4.60%
-    target_value = 100.0
     
+    # Create a straight bond for testing
+    straight_bond = Bond(
+        issue_dt=issue_date,
+        maturity_dt=maturity_date,
+        coupon=straight_bond_coupon,
+        freq_type=FrequencyTypes.ANNUAL,
+        dc_type=DayCountTypes.THIRTY_E_360
+    )
+    target_value = 100
+
     print("Problem Parameters:")
     print(f"Risk-free rate: {risk_free_rate:.2%}")
     print(f"Straight bond coupon: {straight_bond_coupon:.2%}")
     print(f"Target bond value: {target_value}")
     print(f"Call protection: 1 year")
     print()
-    
+
+    # Test the new equivalent initial short rate calculation
+    print("\n=== Testing Equivalent Initial Short Rate Calculation ===")
+        
+    # Test both discrete and continuous modes
+    for discount_mode in ["discrete", "continuous"]:
+        print(f"\n--- Testing {discount_mode.title()} Mode ---")
+        try:
+            equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+                straight_bond=straight_bond,
+                ytm=straight_bond_coupon,  # Use bond coupon as YTM
+                valuation_date=issue_date,
+                discount_mode=discount_mode,
+                tolerance=1e-6
+            )
+            
+            print(f"Input YTM: {solution_info['ytm']:.4%}")
+            print(f"Equivalent short rate: {solution_info['equivalent_short_rate']:.4%}")
+            print(f"Rate difference: {solution_info['rate_difference']:.4%}")
+            print(f"Analytical PV: {solution_info['analytical_pv']:.6f}")
+            print(f"Monte Carlo PV: {solution_info['mc_pv']:.6f}")
+            print(f"Absolute error: {solution_info['error']:.8f}")
+            print(f"Relative error: {solution_info['relative_error']:.8%}")
+            print(f"Number of cash flows: {solution_info['num_cash_flows']}")
+            
+        except Exception as e:
+            print(f"Error in {discount_mode} mode: {e}")
+
     try:
         # Analyze callable bond dynamics first
-        analyze_callable_bond_dynamics(issue_date, maturity_date, risk_free_rate)
-        print()
+        analyze_callable_bond_dynamics(issue_date, maturity_date, equivalent_rate)        
         
         # Solve for callable bond coupon using Monte Carlo optimization
-        print("=== Solving for Callable Bond Coupon ===")
+        print("\n=== Solving for Callable Bond Coupon ===")
         result = solve_callable_bond_coupon(
             issue_date=issue_date,
             maturity_date=maturity_date,
             target_value=target_value,
-            risk_free_rate=risk_free_rate,
+            risk_free_rate=equivalent_rate,
             call_protection_years=1
         )
         
