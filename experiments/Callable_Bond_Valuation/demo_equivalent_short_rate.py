@@ -21,6 +21,7 @@ def main():
     maturity_date = Date(27, 5, 2030)  # 5-year bond
     coupon_rate = 0.046  
     ytm = 0.046  # 4.5% yield to maturity
+    dt=1/365
     
     print("Bond Parameters:")
     print(f"Issue Date: {issue_date}")
@@ -51,6 +52,7 @@ def main():
             # Calculate equivalent short rate
             equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
                 straight_bond=bond,
+                dt=1/365,
                 ytm=ytm,
                 valuation_date=issue_date,
                 discount_mode=discount_mode,
@@ -86,7 +88,7 @@ def main():
     print(f"Analytical Price: {premium_price:.6f}")
     
     equiv_rate, info = calculate_equivalent_initial_short_rate(
-        premium_bond, premium_ytm, issue_date, "discrete", tolerance=1e-6
+        premium_bond, dt, premium_ytm, issue_date, "discrete", tolerance=1e-6
     )
     print(f"Equivalent Short Rate: {equiv_rate:.4%} (vs YTM: {premium_ytm:.4%})")
     print(f"Rate Difference: {info['rate_difference']:.4%}")
@@ -107,7 +109,7 @@ def main():
     print(f"Analytical Price: {discount_price:.6f}")
     
     equiv_rate, info = calculate_equivalent_initial_short_rate(
-        discount_bond, discount_ytm, issue_date, "discrete", tolerance=1e-6
+        discount_bond, dt, discount_ytm, issue_date, "discrete", tolerance=1e-6
     )
     print(f"Equivalent Short Rate: {equiv_rate:.4%} (vs YTM: {discount_ytm:.4%})")
     print(f"Rate Difference: {info['rate_difference']:.4%}")

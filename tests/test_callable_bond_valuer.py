@@ -23,7 +23,10 @@ class TestCallableBondValuer:
             "issue_date": Date(27, 5, 2025),
             "maturity_date": Date(27, 5, 2030),
         }
-
+    @pytest.fixture
+    def daily_dt(self):
+        return 1/365
+    
     @pytest.fixture
     def callable_bond(self, test_dates):
         """Fixture providing a test callable bond."""
@@ -48,7 +51,7 @@ class TestCallableBondValuer:
         """Fixture providing a test callable bond valuer."""
         return CallableBondValuer(callable_bond, rate_simulator)
 
-    def test_pv_calculation_discrete_mode(self, valuer, test_dates):
+    def test_pv_calculation_discrete_mode(self, valuer, test_dates, daily_dt):
         """Test present value calculation in discrete mode."""
         discount_rate = 0.0435
         flat_rate_path = np.full(365 * 5, discount_rate)
@@ -57,11 +60,12 @@ class TestCallableBondValuer:
         test_cf_dates = [test_dates["issue_date"].add_years(1)]
         test_cf_amounts = [5.0]  # 5% of 100 face value
 
-        calculated_pv = valuer._pv_of_future_cash_flows(
+        calculated_pv = valuer.pv_of_future_cash_flows(
             test_cf_dates,
             test_cf_amounts,
             test_dates["issue_date"],
             flat_rate_path,
+            daily_dt,
             discount_mode="discrete",
         )
         # Use daily compounding to match the implementation's behavior
@@ -72,7 +76,7 @@ class TestCallableBondValuer:
             abs(calculated_pv - expected_pv) < 1e-4
         ), f"Discrete PV calculation failed. Expected: {expected_pv:.6f}, Got: {calculated_pv:.6f}"
 
-    def test_pv_calculation_continuous_mode(self, valuer, test_dates):
+    def test_pv_calculation_continuous_mode(self, valuer, test_dates, daily_dt):
         """Test present value calculation in continuous mode."""
         discount_rate = 0.0435
         flat_rate_path = np.full(365 * 5, discount_rate)
@@ -81,11 +85,12 @@ class TestCallableBondValuer:
         test_cf_dates = [test_dates["issue_date"].add_years(1)]
         test_cf_amounts = [5.0]  # 5% of 100 face value
 
-        calculated_pv = valuer._pv_of_future_cash_flows(
+        calculated_pv = valuer.pv_of_future_cash_flows(
             test_cf_dates,
             test_cf_amounts,
             test_dates["issue_date"],
             flat_rate_path,
+            daily_dt,
             discount_mode="continuous",
         )
         expected_pv = 5.0 * np.exp(-discount_rate * 1.0)  # Continuous compounding
@@ -95,7 +100,7 @@ class TestCallableBondValuer:
         ), f"Continuous PV calculation failed. Expected: {expected_pv:.6f}, Got: {calculated_pv:.6f}"
 
     def test_straight_bond_valuation_vs_financepy(
-        self, valuer, callable_bond, test_dates
+        self, valuer, callable_bond, test_dates, daily_dt
     ):
         """Test that our straight bond valuation matches FinancePy within reasonable tolerance."""
         discount_rate = 0.0435
@@ -117,19 +122,21 @@ class TestCallableBondValuer:
             bond_cf_amounts[-1] += callable_bond.face_value
 
         # Discrete mode for comparison
-        discrete_pv = valuer._pv_of_future_cash_flows(
+        discrete_pv = valuer.pv_of_future_cash_flows(
             bond_cf_dates,
             bond_cf_amounts,
             test_dates["issue_date"],
             flat_rate_path,
+            daily_dt,
             discount_mode="discrete",
         )
         # Continuous mode for comparison
-        continuous_pv = valuer._pv_of_future_cash_flows(
+        continuous_pv = valuer.pv_of_future_cash_flows(
             bond_cf_dates,
             bond_cf_amounts,
             test_dates["issue_date"],
             flat_rate_path,
+            daily_dt,
             discount_mode="continuous",
         )
 
@@ -150,7 +157,7 @@ class TestCallableBondValuer:
         ), f"Bond valuation differs too much from FinancePy. Our: {continuous_pv:.4f}, FinancePy: {financepy_pv:.4f}, Diff: {abs(continuous_pv - financepy_pv):.4f}"
         
     def test_pv_calculation_with_cash_flow_on_valuation_date(
-        self, valuer, test_dates
+        self, valuer, test_dates, daily_dt
     ):
         """Test that cash flows on the valuation date are not discounted."""
         flat_rate_path = np.full(365 * 5, 0.05)
@@ -159,15 +166,15 @@ class TestCallableBondValuer:
         test_cf_dates = [test_dates["issue_date"]]  # Same as valuation date
         test_cf_amounts = [10.0]
 
-        calculated_pv = valuer._pv_of_future_cash_flows(
-            test_cf_dates, test_cf_amounts, test_dates["issue_date"], flat_rate_path
+        calculated_pv = valuer.pv_of_future_cash_flows(
+            test_cf_dates, test_cf_amounts, test_dates["issue_date"], flat_rate_path, daily_dt
         )
 
         assert (
             abs(calculated_pv - 10.0) < 1e-6
         ), f"Cash flow on valuation date should not be discounted. Expected: 10.0, Got: {calculated_pv:.6f}"
 
-    def test_pv_calculation_ignores_past_cash_flows(self, valuer, test_dates):
+    def test_pv_calculation_ignores_past_cash_flows(self, valuer, test_dates, daily_dt):
         """Test that past cash flows are ignored."""
         flat_rate_path = np.full(365 * 5, 0.05)
 
@@ -176,30 +183,31 @@ class TestCallableBondValuer:
         test_cf_dates = [past_date]
         test_cf_amounts = [100.0]
 
-        calculated_pv = valuer._pv_of_future_cash_flows(
-            test_cf_dates, test_cf_amounts, test_dates["issue_date"], flat_rate_path
+        calculated_pv = valuer.pv_of_future_cash_flows(
+            test_cf_dates, test_cf_amounts, test_dates["issue_date"], flat_rate_path, daily_dt
         )
 
         assert (
             abs(calculated_pv) < 1e-6
         ), f"Past cash flows should be ignored. Expected: 0.0, Got: {calculated_pv:.6f}"
 
-    def test_invalid_discount_mode_raises_error(self, valuer, test_dates):
+    def test_invalid_discount_mode_raises_error(self, valuer, test_dates, daily_dt):
         """Test that invalid discount mode raises ValueError."""
         flat_rate_path = np.full(365 * 5, 0.05)
         test_cf_dates = [test_dates["issue_date"].add_years(1)]
         test_cf_amounts = [5.0]
 
         with pytest.raises(ValueError, match="Invalid discount mode"):
-            valuer._pv_of_future_cash_flows(
+            valuer.pv_of_future_cash_flows(
                 test_cf_dates,
                 test_cf_amounts,
                 test_dates["issue_date"],
                 flat_rate_path,
+                daily_dt,
                 discount_mode="invalid_mode",
             )
 
-    def test_calculate_equivalent_initial_short_rate_discrete(self, test_dates):
+    def test_calculate_equivalent_initial_short_rate_discrete(self, test_dates, daily_dt):
         """Test equivalent initial short rate calculation in discrete mode."""
         # Create a straight bond
         straight_bond = Bond(
@@ -215,6 +223,7 @@ class TestCallableBondValuer:
         # Calculate equivalent short rate
         equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
+            dt=daily_dt,
             ytm=ytm,
             valuation_date=test_dates["issue_date"],
             discount_mode="discrete",
@@ -231,7 +240,7 @@ class TestCallableBondValuer:
         # The equivalent rate should be close to but not necessarily equal to YTM
         assert abs(equivalent_rate - ytm) < 0.02, f"Equivalent rate {equivalent_rate:.4%} too far from YTM {ytm:.4%}"
 
-    def test_calculate_equivalent_initial_short_rate_continuous(self, test_dates):
+    def test_calculate_equivalent_initial_short_rate_continuous(self, test_dates, daily_dt):
         """Test equivalent initial short rate calculation in continuous mode."""
         # Create a straight bond
         straight_bond = Bond(
@@ -247,6 +256,7 @@ class TestCallableBondValuer:
         # Calculate equivalent short rate
         equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
+            dt=daily_dt,
             ytm=ytm,
             valuation_date=test_dates["issue_date"],
             discount_mode="continuous",
@@ -262,7 +272,7 @@ class TestCallableBondValuer:
         # For a par bond, the equivalent rate should be very close to YTM
         assert abs(equivalent_rate - ytm) < 0.005, f"Equivalent rate {equivalent_rate:.4%} should be close to YTM {ytm:.4%} for par bond"
 
-    def test_calculate_equivalent_initial_short_rate_premium_bond(self, test_dates):
+    def test_calculate_equivalent_initial_short_rate_premium_bond(self, test_dates, daily_dt):
         """Test equivalent initial short rate calculation for a premium bond."""
         # Create a premium bond (high coupon, low YTM)
         straight_bond = Bond(
@@ -278,6 +288,7 @@ class TestCallableBondValuer:
         # Calculate equivalent short rate
         equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
+            dt=daily_dt,
             ytm=ytm,
             valuation_date=test_dates["issue_date"],
             discount_mode="discrete",
@@ -291,7 +302,7 @@ class TestCallableBondValuer:
         # Bond should be trading at premium
         assert solution_info['analytical_pv'] > 100, "Bond should be at premium"
 
-    def test_calculate_equivalent_initial_short_rate_discount_bond(self, test_dates):
+    def test_calculate_equivalent_initial_short_rate_discount_bond(self, test_dates, daily_dt):
         """Test equivalent initial short rate calculation for a discount bond."""
         # Create a discount bond (low coupon, high YTM)
         straight_bond = Bond(
@@ -307,6 +318,7 @@ class TestCallableBondValuer:
         # Calculate equivalent short rate
         equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
+            dt=daily_dt,
             ytm=ytm,
             valuation_date=test_dates["issue_date"],
             discount_mode="continuous",
@@ -320,7 +332,7 @@ class TestCallableBondValuer:
         # Bond should be trading at discount
         assert solution_info['analytical_pv'] < 100, "Bond should be at discount"
 
-    def test_calculate_equivalent_initial_short_rate_invalid_inputs(self, test_dates):
+    def test_calculate_equivalent_initial_short_rate_invalid_inputs(self, test_dates, daily_dt):
         """Test equivalent initial short rate calculation with invalid inputs."""
         straight_bond = Bond(
             issue_dt=test_dates["issue_date"],
@@ -334,6 +346,7 @@ class TestCallableBondValuer:
         with pytest.raises(ValueError, match="Invalid discount mode"):
             calculate_equivalent_initial_short_rate(
                 straight_bond=straight_bond,
+                dt=daily_dt,
                 ytm=0.05,
                 valuation_date=test_dates["issue_date"],
                 discount_mode="invalid_mode"
