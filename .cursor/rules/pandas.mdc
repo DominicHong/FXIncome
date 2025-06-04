@@ -1,11 +1,10 @@
 ---
-description: General rules for styles, format, and documentation.
-globs: 
+description: 
+globs: *.py
 alwaysApply: false
 ---
 ---
 globs: *.py
-alwaysApply: false
 ---
 ## Key Principles
 - **Operating System**: Windows. Use windows path format. Use Windows-compatible commands.

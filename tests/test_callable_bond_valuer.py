@@ -4,7 +4,6 @@ from experiments.Callable_Bond_Valuation.callable_bond_valuer import (
     CallableBond,
     CallableBondValuer,
     InterestRateSimulator,
-    calculate_equivalent_initial_short_rate,
 )
 
 from financepy.utils.date import Date
@@ -159,10 +158,10 @@ class TestCallableBondValuer:
     def test_pv_calculation_with_cash_flow_on_valuation_date(
         self, valuer, test_dates, daily_dt
     ):
-        """Test that cash flows on the valuation date are not discounted."""
+        """Test that cash flows on the valuation date should not be added to the PV."""
         flat_rate_path = np.full(365 * 5, 0.05)
 
-        # Cash flow on valuation date should have PV = cash flow amount
+        # Cash flow on valuation date is only received by the bond holder on the previous date
         test_cf_dates = [test_dates["issue_date"]]  # Same as valuation date
         test_cf_amounts = [10.0]
 
@@ -171,8 +170,8 @@ class TestCallableBondValuer:
         )
 
         assert (
-            abs(calculated_pv - 10.0) < 1e-6
-        ), f"Cash flow on valuation date should not be discounted. Expected: 10.0, Got: {calculated_pv:.6f}"
+            abs(calculated_pv - 0.0) < 1e-6
+        ), f"Cash flow on valuation date should not be added to the PV. Expected: 0.0, Got: {calculated_pv:.6f}"
 
     def test_pv_calculation_ignores_past_cash_flows(self, valuer, test_dates, daily_dt):
         """Test that past cash flows are ignored."""
@@ -221,7 +220,7 @@ class TestCallableBondValuer:
         ytm = 0.045  # 4.5% YTM
         
         # Calculate equivalent short rate
-        equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+        equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
             dt=daily_dt,
             ytm=ytm,
@@ -254,7 +253,7 @@ class TestCallableBondValuer:
         ytm = 0.04  # 4% YTM (par bond)
         
         # Calculate equivalent short rate
-        equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+        equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
             dt=daily_dt,
             ytm=ytm,
@@ -286,7 +285,7 @@ class TestCallableBondValuer:
         ytm = 0.06  # 6% YTM (premium bond)
         
         # Calculate equivalent short rate
-        equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+        equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
             dt=daily_dt,
             ytm=ytm,
@@ -316,7 +315,7 @@ class TestCallableBondValuer:
         ytm = 0.05  # 5% YTM (discount bond)
         
         # Calculate equivalent short rate
-        equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+        equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
             straight_bond=straight_bond,
             dt=daily_dt,
             ytm=ytm,
@@ -344,7 +343,7 @@ class TestCallableBondValuer:
         
         # Test invalid discount mode
         with pytest.raises(ValueError, match="Invalid discount mode"):
-            calculate_equivalent_initial_short_rate(
+            CallableBondValuer.calculate_equivalent_initial_short_rate(
                 straight_bond=straight_bond,
                 dt=daily_dt,
                 ytm=0.05,

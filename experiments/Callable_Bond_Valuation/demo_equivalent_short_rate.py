@@ -1,7 +1,7 @@
 """
-Demonstration of the calculate_equivalent_initial_short_rate function.
+Demonstration of the CallableBondValuer.calculate_equivalent_initial_short_rate method.
 
-This script shows how to use the new function to find an equivalent flat short rate
+This script shows how to use the new class method to find an equivalent flat short rate
 that makes Monte Carlo valuation match analytical bond pricing.
 """
 
@@ -10,7 +10,7 @@ from financepy.utils.date import Date
 from financepy.utils.frequency import FrequencyTypes
 from financepy.utils.day_count import DayCountTypes
 
-from callable_bond_valuer import calculate_equivalent_initial_short_rate
+from callable_bond_valuer import CallableBondValuer
 
 
 def main():
@@ -50,7 +50,7 @@ def main():
         
         try:
             # Calculate equivalent short rate
-            equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+            equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
                 straight_bond=bond,
                 dt=1/365,
                 ytm=ytm,
@@ -87,7 +87,7 @@ def main():
     premium_price = premium_bond.dirty_price_from_ytm(issue_date, premium_ytm)
     print(f"Analytical Price: {premium_price:.6f}")
     
-    equiv_rate, info = calculate_equivalent_initial_short_rate(
+    equiv_rate, info = CallableBondValuer.calculate_equivalent_initial_short_rate(
         premium_bond, dt, premium_ytm, issue_date, "discrete", tolerance=1e-6
     )
     print(f"Equivalent Short Rate: {equiv_rate:.4%} (vs YTM: {premium_ytm:.4%})")
@@ -108,7 +108,7 @@ def main():
     discount_price = discount_bond.dirty_price_from_ytm(issue_date, discount_ytm)
     print(f"Analytical Price: {discount_price:.6f}")
     
-    equiv_rate, info = calculate_equivalent_initial_short_rate(
+    equiv_rate, info = CallableBondValuer.calculate_equivalent_initial_short_rate(
         discount_bond, dt, discount_ytm, issue_date, "discrete", tolerance=1e-6
     )
     print(f"Equivalent Short Rate: {equiv_rate:.4%} (vs YTM: {discount_ytm:.4%})")
@@ -116,7 +116,7 @@ def main():
     print()
     
     print("=== Summary ===")
-    print("The calculate_equivalent_initial_short_rate function successfully:")
+    print("The CallableBondValuer.calculate_equivalent_initial_short_rate method successfully:")
     print("1. Finds a flat short rate that matches analytical bond pricing")
     print("2. Works with both discrete and continuous discounting modes")
     print("3. Handles premium, par, and discount bonds")

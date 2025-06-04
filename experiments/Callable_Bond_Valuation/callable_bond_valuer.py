@@ -194,6 +194,36 @@ class CallableBond:
             call_date = call_date.add_years(1)
 
         return call_dates
+    
+    def cashflow_since_date(self, date: Date) -> tuple[list[Date], list[float]]:
+        """
+        Get bond cash flows since a given date(exclusive).
+        Cash flow on valuation date is received by the bond holder on the previous date.
+        FinancePy cash flows are per unit face value. 
+        The cashflow returned by this method is scaled by actual face value.
+        Args:
+            date: Date to get cash flows since
+        Returns:
+            Tuple of (list of cash flow dates, list of cash flow amounts)
+        """
+        # Get financepy bond cash flows and dates from the underlying bond
+        # FinancePy Bond cash flows are per unit face value, so scale by actual face value
+        financepy_cf_dates = self.bond.cpn_dts
+        financepy_cf_amounts = [
+            cf * self.face_value
+            for cf in self.bond.flow_amounts
+        ]
+        cf_dates = []
+        cf_amounts = []
+        for cf_date, cf_amount in zip(financepy_cf_dates, financepy_cf_amounts):
+            if cf_date > date:
+                cf_dates.append(cf_date)
+                cf_amounts.append(cf_amount)
+        
+        # FinancePy doesn't include principal in the final payment, add it manually
+        cf_amounts[-1] += self.face_value
+        
+        return cf_dates, cf_amounts
 
     def dirty_price_from_ytm(
         self,
@@ -261,15 +291,13 @@ class CallableBondValuer:
             Present value of the cash flows
         """
         pv = 0.0
-        path_dt = dt
         max_path_idx = len(rate_path)
 
         for cf_date, cf_amount in zip(cash_flow_dates, cash_flow_amounts):
-            if cf_date < valuation_date:
+            # Cash flow on valuation date is received by the bond holder on the previous date
+            if cf_date <= valuation_date:  
                 continue
-            elif cf_date == valuation_date:
-                pv += cf_amount
-                continue
+
             # Calculate number of days from valuation_date to cf_date
             # rate_path[0] is for the first period from valuation_date
             days_to_cf = int(
@@ -294,14 +322,142 @@ class CallableBondValuer:
             # $\exp\left(-\sum_{i=1}^{n} r_i \cdot \Delta t\right)$
 
             if discount_mode == "discrete":
-                discount_factor = 1.0 / np.prod(1 + relevant_rates * path_dt)
+                discount_factor = 1.0 / np.prod(1 + relevant_rates * dt)
             elif discount_mode == "continuous":
-                discount_factor = np.exp(-np.sum(relevant_rates * path_dt))
+                discount_factor = np.exp(-np.sum(relevant_rates * dt))
             else:
                 raise ValueError(f"Invalid discount mode: {discount_mode}")
             pv += cf_amount * discount_factor
 
         return pv
+
+    @classmethod
+    def calculate_equivalent_initial_short_rate(
+        cls,
+        straight_bond: Bond,
+        dt: float,
+        ytm: float,
+        valuation_date: Date,
+        discount_mode: str = "discrete",
+        tolerance: float = 1e-6,
+        max_iterations: int = 50,
+    ) -> tuple[float, dict]:
+        """Calculate equivalent initial short rate for Monte Carlo simulation.
+
+        This method finds a flat short rate that, when used in the Monte Carlo
+        discounting framework (CallableBondValuer.pv_of_future_cash_flows), 
+        produces the same present value as the analytical bond valuation.
+
+        Args:
+            straight_bond: FinancePy Bond object
+            dt: Time step (unit: year) for the rate path
+            ytm: Yield to maturity of the bond, for calculating the analytical bond price
+            valuation_date: Date to value the bond
+            discount_mode: "discrete" or "continuous" discounting mode
+            tolerance: Convergence tolerance for the optimization
+            max_iterations: Maximum number of optimization iterations
+
+        Returns:
+            Tuple of (equivalent_short_rate, solution_info)
+        """
+
+        # Get analytical bond price using FinancePy
+        analytical_pv = straight_bond.dirty_price_from_ytm(
+            valuation_date, ytm, YTMCalcType.US_STREET
+        )
+
+        # Create a CallableBond from the straight bond to use cashflow_since_date()
+        callable_bond = CallableBond(
+            issue_date=straight_bond.issue_dt,
+            maturity_date=straight_bond.maturity_dt,
+            coupon_rate=straight_bond.cpn,
+            call_protection_years=0,  # No call protection for straight bond equivalent
+            face_value=straight_bond.par,
+            freq_type=straight_bond.freq_type,
+            day_count_type=straight_bond.dc_type,
+        )
+        
+        # Use cashflow_since_date() to get bond cash flows
+        bond_cf_dates, bond_cf_amounts = callable_bond.cashflow_since_date(valuation_date)
+
+        def objective_function(flat_rate: float) -> float:
+            """Objective function: difference between MC PV and analytical PV."""
+
+            # Calculate maximum days needed for discounting
+            max_days_to_maturity = int((straight_bond.maturity_dt - valuation_date)) + 1
+
+            # Create flat rate path
+            flat_rate_path = np.full(max_days_to_maturity, flat_rate)
+
+            # Calculate PV using Monte Carlo discounting method
+            mc_pv = cls.pv_of_future_cash_flows(
+                bond_cf_dates,
+                bond_cf_amounts,
+                valuation_date,
+                flat_rate_path,
+                dt,
+                discount_mode=discount_mode,
+            )
+
+            return mc_pv - analytical_pv
+
+        # Set up bounds for optimization
+        lower_bound = max(0.0001, ytm - 0.05)  # At least 1bp, YTM - 5%
+        upper_bound = ytm + 0.05  # YTM + 5%
+
+        # Test bounds
+        f_lower = objective_function(lower_bound)
+        f_upper = objective_function(upper_bound)
+
+        # Expand bounds if they don't bracket the root
+        if f_lower * f_upper > 0:
+            if f_lower > 0:  # Both positive, need lower rate
+                lower_bound = max(0.0001, ytm - 0.10)
+            else:  # Both negative, need higher rate
+                upper_bound = ytm + 0.10
+
+            f_lower = objective_function(lower_bound)
+            f_upper = objective_function(upper_bound)
+
+        # Solve for equivalent short rate using Brent's method
+        try:
+            equivalent_rate = optimize.brentq(
+                objective_function,
+                a=lower_bound,
+                b=upper_bound,
+                xtol=tolerance,
+                maxiter=max_iterations,
+            )
+
+            # Calculate final verification
+            max_days_to_maturity = int((straight_bond.maturity_dt - valuation_date)) + 1
+            flat_rate_path = np.full(max_days_to_maturity, equivalent_rate)
+
+            final_mc_pv = cls.pv_of_future_cash_flows(
+                bond_cf_dates,
+                bond_cf_amounts,
+                valuation_date,
+                flat_rate_path,
+                dt,
+                discount_mode=discount_mode,
+            )
+
+            solution_info = {
+                "equivalent_short_rate": equivalent_rate,
+                "analytical_pv": analytical_pv,
+                "mc_pv": final_mc_pv,
+                "error": abs(final_mc_pv - analytical_pv),
+                "relative_error": abs(final_mc_pv - analytical_pv) / analytical_pv,
+                "ytm": ytm,
+                "rate_difference": equivalent_rate - ytm,
+                "discount_mode": discount_mode,
+                "num_cash_flows": len(bond_cf_dates)
+            }
+
+            return equivalent_rate, solution_info
+
+        except ValueError as e:
+            raise ValueError(f"Could not find equivalent short rate: {e}")
 
     def value_bond(
         self,
@@ -369,58 +525,32 @@ class CallableBondValuer:
         Returns:
             Tuple of (bond_value, was_called, call_info)
         """
-        # Get all nominal cash flows and dates from the underlying bond
-        # FinancePy Bond cash flows are per unit face value, so scale by actual face value
-        all_cf_dates = self.callable_bond.bond.cpn_dts
-        all_cf_amounts = [
-            cf * self.callable_bond.face_value
-            for cf in self.callable_bond.bond.flow_amounts
-        ]
-
-        # Filter cash flows to only include those after valuation_date
-        bond_cf_dates = []
-        bond_cf_amounts = []
-        
-        for cf_date, cf_amount in zip(all_cf_dates, all_cf_amounts):
-            if cf_date > valuation_date:
-                bond_cf_dates.append(cf_date)
-                bond_cf_amounts.append(cf_amount)
-
-        # FinancePy doesn't include principal in the final payment, add it manually
-        if (
-            len(bond_cf_dates) > 0
-            and bond_cf_dates[-1] == self.callable_bond.maturity_date
-            and len(bond_cf_amounts) > 0
-        ):
-            # Check if last payment is just a coupon (needs principal added)
-            expected_coupon = (
-                self.callable_bond.coupon_rate * self.callable_bond.face_value
-            )
-            if abs(bond_cf_amounts[-1] - expected_coupon) < 0.01:
-                bond_cf_amounts[-1] += self.callable_bond.face_value
+        # Get all bond cash flows after valuation_date
+        bond_cf_dates, bond_cf_amounts = self.callable_bond.cashflow_since_date(valuation_date)
 
         # Check each call date to see if bond should be called
         for call_date in self.callable_bond.call_dates:
             if call_date <= valuation_date:
                 continue  # Already past this call date or on valuation date
 
-            # Calculate years from valuation to call date for rate_at_call
-            years_to_call = (
-                call_date - valuation_date
-            ) / 365.25  # Approximate for indexing
-            time_index = min(int(years_to_call * 365), len(rate_path) - 1)
-            if time_index < 0:  # Should not happen if call_date > valuation_date
-                continue
-
-            rate_at_call = (
-                rate_path[time_index] if time_index < len(rate_path) else rate_path[-1]
-            )
-
             # Calculate continuation value (value if not called at this call_date)
-            # This uses FinancePy's YTM-based pricing for the bond from call_date onwards,
-            # using the simulated rate_at_call as the YTM. This is a common simplification.
-            continuation_value = self.callable_bond.dirty_price_from_ytm(
-                call_date, rate_at_call, YTMCalcType.US_STREET
+            # Use Monte Carlo discounting for consistency with the overall framework
+            
+            # Get cash flows from call_date to maturity
+            continuation_cf_dates, continuation_cf_amounts = self.callable_bond.cashflow_since_date(call_date)
+            
+            # Extract rate path from call_date onwards
+            call_time_index = max(0, min(int(call_date - valuation_date), len(rate_path) - 1))
+            rate_path_from_call = rate_path[call_time_index:]
+            
+            # Calculate continuation value using Monte Carlo discounting
+            continuation_value = self.pv_of_future_cash_flows(
+                continuation_cf_dates,
+                continuation_cf_amounts,
+                call_date,
+                rate_path_from_call,
+                self.rate_simulator._dt,
+                discount_mode="discrete"
             )
 
             # Call value (par + premium)
@@ -434,30 +564,27 @@ class CallableBondValuer:
                 effective_cf_amounts = []
                 coupon_on_call_date = 0.0
 
+                # Get all bond cash flows from valuation_date onwards
+                cf_dates, cf_amounts = self.callable_bond.cashflow_since_date(valuation_date)
+                
                 # Process each cash flow from the bond
-                for i, (bond_cf_date, cf_amount) in enumerate(
-                    zip(all_cf_dates, all_cf_amounts)
-                ):
-                    if bond_cf_date <= valuation_date:
-                        continue  # Skip past cash flows
-
-                    if bond_cf_date < call_date:
+                for cf_date, cf_amount in zip(cf_dates, cf_amounts):
+                    if cf_date < call_date:
                         # This is a coupon payment before call date
-                        effective_cf_dates.append(bond_cf_date)
+                        effective_cf_dates.append(cf_date)
                         effective_cf_amounts.append(cf_amount)
-                    elif bond_cf_date == call_date:
-                        # If call date coincides with a coupon date, include the coupon
-                        # The final payment at maturity typically includes both coupon and principal
-                        # We need to extract just the coupon part if this is the maturity date
-                        if bond_cf_date == self.callable_bond.maturity_date:
+                    elif cf_date == call_date:
+                        # If call date coincides with a coupon date, include the coupon.
+                        # The final payment at maturity includes both coupon and principal.
+                        # We need to extract just the coupon part if this is the maturity date.
+                        if cf_date == self.callable_bond.maturity_date:
                             # This is the final payment which includes both coupon and principal
                             # Extract just the coupon portion
-                            coupon_per_period = (
+                            coupon_on_call_date = (
                                 self.callable_bond.bond._coupon
                                 / self.callable_bond.bond._frequency
                                 * self.callable_bond.face_value
                             )
-                            coupon_on_call_date = coupon_per_period
                         else:
                             # This is just a regular coupon payment
                             coupon_on_call_date = cf_amount
@@ -489,143 +616,6 @@ class CallableBondValuer:
         return not_called_bond_value, False, {}
 
 
-def calculate_equivalent_initial_short_rate(
-    straight_bond: Bond,
-    dt: float,
-    ytm: float,
-    valuation_date: Date,
-    discount_mode: str = "discrete",
-    tolerance: float = 1e-6,
-    max_iterations: int = 50,
-) -> tuple[float, dict]:
-    """Calculate equivalent initial short rate for Monte Carlo simulation.
-
-    This function finds a flat short rate that, when used in the Monte Carlo
-    discounting framework (_pv_of_future_cash_flows), produces the same present
-    value as the analytical bond valuation.
-
-    Args:
-        straight_bond: FinancePy Bond object
-        dt: Time step (unit: year) for the rate path
-        ytm: Yield to maturity of the bond
-        valuation_date: Date to value the bond
-        discount_mode: "discrete" or "continuous" discounting mode
-        tolerance: Convergence tolerance for the optimization
-        max_iterations: Maximum number of optimization iterations
-
-    Returns:
-        Tuple of (equivalent_short_rate, solution_info)
-    """
-
-    # Get analytical bond price using FinancePy
-    analytical_pv = straight_bond.dirty_price_from_ytm(
-        valuation_date, ytm, YTMCalcType.US_STREET
-    )
-
-    # Extract bond cash flows and dates
-    all_cf_dates = straight_bond.cpn_dts
-    all_cf_amounts = [cf * straight_bond.par for cf in straight_bond.flow_amounts]
-
-    # Filter cash flows to only include those after valuation_date
-    bond_cf_dates = []
-    bond_cf_amounts = []
-    
-    for cf_date, cf_amount in zip(all_cf_dates, all_cf_amounts):
-        if cf_date > valuation_date:
-            bond_cf_dates.append(cf_date)
-            bond_cf_amounts.append(cf_amount)
-
-    # FinancePy doesn't include principal in the final payment, add it manually
-    if (
-        len(bond_cf_dates) > 0
-        and bond_cf_dates[-1] == straight_bond.maturity_dt
-        and len(bond_cf_amounts) > 0
-    ):
-        # Check if last payment is just a coupon (needs principal added)
-        expected_coupon = straight_bond.cpn * straight_bond.par
-        if abs(bond_cf_amounts[-1] - expected_coupon) < 0.01:
-            bond_cf_amounts[-1] += straight_bond.par
-
-    def objective_function(flat_rate: float) -> float:
-        """Objective function: difference between MC PV and analytical PV."""
-
-        # Calculate maximum days needed for discounting
-        max_days_to_maturity = int((straight_bond.maturity_dt - valuation_date)) + 1
-
-        # Create flat rate path
-        flat_rate_path = np.full(max_days_to_maturity, flat_rate)
-
-        # Calculate PV using Monte Carlo discounting method
-        mc_pv = CallableBondValuer.pv_of_future_cash_flows(
-            bond_cf_dates,
-            bond_cf_amounts,
-            valuation_date,
-            flat_rate_path,
-            dt,
-            discount_mode=discount_mode,
-        )
-
-        return mc_pv - analytical_pv
-
-    # Set up bounds for optimization
-    lower_bound = max(0.0001, ytm - 0.05)  # At least 1bp, YTM - 5%
-    upper_bound = ytm + 0.05  # YTM + 5%
-
-    # Test bounds
-    f_lower = objective_function(lower_bound)
-    f_upper = objective_function(upper_bound)
-
-    # Expand bounds if they don't bracket the root
-    if f_lower * f_upper > 0:
-        if f_lower > 0:  # Both positive, need lower rate
-            lower_bound = max(0.0001, ytm - 0.10)
-        else:  # Both negative, need higher rate
-            upper_bound = ytm + 0.10
-
-        f_lower = objective_function(lower_bound)
-        f_upper = objective_function(upper_bound)
-
-    # Solve for equivalent short rate using Brent's method
-    try:
-        equivalent_rate = optimize.brentq(
-            objective_function,
-            a=lower_bound,
-            b=upper_bound,
-            xtol=tolerance,
-            maxiter=max_iterations,
-        )
-
-        # Calculate final verification
-        max_days_to_maturity = int((straight_bond.maturity_dt - valuation_date)) + 1
-        flat_rate_path = np.full(max_days_to_maturity, equivalent_rate)
-
-        final_mc_pv = CallableBondValuer.pv_of_future_cash_flows(
-            bond_cf_dates,
-            bond_cf_amounts,
-            valuation_date,
-            flat_rate_path,
-            dt,
-            discount_mode=discount_mode,
-        )
-
-        solution_info = {
-            "equivalent_short_rate": equivalent_rate,
-            "analytical_pv": analytical_pv,
-            "mc_pv": final_mc_pv,
-            "error": abs(final_mc_pv - analytical_pv),
-            "relative_error": abs(final_mc_pv - analytical_pv) / analytical_pv,
-            "ytm": ytm,
-            "rate_difference": equivalent_rate - ytm,
-            "discount_mode": discount_mode,
-            "num_cash_flows": len(bond_cf_dates) - 1,  # Exclude issue date
-        }
-
-        return equivalent_rate, solution_info
-
-    except ValueError as e:
-        raise ValueError(f"Could not find equivalent short rate: {e}")
-
-
 def solve_callable_bond_coupon(
     issue_date: Date,
     maturity_date: Date,
@@ -653,7 +643,7 @@ def solve_callable_bond_coupon(
     rate_simulator = InterestRateSimulator(
         r0=r0,
         mu=0,
-        sigma=0.20,
+        sigma=0.15,
         days=365 * 5,
         num_paths=1000,
         model="gbm",
@@ -803,7 +793,7 @@ def analyze_callable_bond_dynamics(
         )
 
         # Calculate equivalent initial short rate for different coupon rates
-        equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+        equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
             straight_bond=callable_bond.bond,
             dt=1/days_of_year,
             ytm=straight_bond_ytm,  
@@ -816,7 +806,7 @@ def analyze_callable_bond_dynamics(
         rate_simulator = InterestRateSimulator(
             r0=equivalent_rate,
             mu=0,
-            sigma=0.20,
+            sigma=0.15,
             days=365 * 5,
             days_of_year=days_of_year,
             num_paths=1000,
@@ -873,7 +863,7 @@ def main():
     for discount_mode in ["discrete", "continuous"]:
         print(f"\n--- Testing {discount_mode.title()} Mode ---")
         try:
-            equivalent_rate, solution_info = calculate_equivalent_initial_short_rate(
+            equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
                 straight_bond=straight_bond,
                 dt=dt,
                 ytm=straight_bond_coupon,  # Use bond coupon as YTM
