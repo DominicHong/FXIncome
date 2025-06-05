@@ -82,11 +82,21 @@ class InterestRateSimulator:
                 # Ensure non-negative rates
                 rates[:, t] = np.maximum(rates[:, t], 0.0001)
 
-        elif self.model == "abw":
+        elif self.model == "abm":
             # Arithmetic Brownian Motion: dr = mu*dt + sigma*dW
             for t in range(1, self.days):
                 dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
                 rates[:, t] = rates[:, t - 1] + self.mu * self._dt + self.sigma * dW
+        
+        elif self.model == "gbm":
+            # Geometric Brownian Motion (continuous)
+            for t in range(1, self.days):
+                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
+                rates[:, t] = rates[:, t - 1] * np.exp(
+                    (self.mu - 0.5 * self.sigma**2) * self._dt
+                    + self.sigma * dW
+                )
+        
         else:
             raise ValueError(f"Unknown model: {self.model}")
 
@@ -792,11 +802,11 @@ def analyze_callable_bond_dynamics(
         rate_simulator = InterestRateSimulator(
             r0=equivalent_rate,
             mu=0,
-            sigma=0.008,
+            sigma=0.0095,
             days=365 * 5,
             days_of_year=days_of_year,
             num_paths=1000,
-            model="abw",
+            model="abm",
             kappa=0.1,
         )
         # Create valuer
@@ -856,10 +866,10 @@ def main():
     rate_simulator = InterestRateSimulator(
         r0=equivalent_rate,
         mu=0,
-        sigma=0.008,
+        sigma=0.0095,
         days=365 * 5,
         num_paths=5000,
-        model="abw",
+        model="abm",
         kappa=0.1,
     )
 
