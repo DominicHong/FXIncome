@@ -82,13 +82,11 @@ class InterestRateSimulator:
                 # Ensure non-negative rates
                 rates[:, t] = np.maximum(rates[:, t], 0.0001)
 
-        elif self.model == "gbm":
-            # Geometric Brownian Motion: dr = mu*r*dt + sigma*r*dW
+        elif self.model == "abw":
+            # Arithmetic Brownian Motion: dr = mu*dt + sigma*dW
             for t in range(1, self.days):
                 dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
-                rates[:, t] = rates[:, t - 1] * np.exp(
-                    (self.mu - 0.5 * self.sigma**2) * self._dt + self.sigma * dW
-                )
+                rates[:, t] = rates[:, t - 1] + self.mu * self._dt + self.sigma * dW
         else:
             raise ValueError(f"Unknown model: {self.model}")
 
@@ -620,7 +618,7 @@ def solve_callable_bond_coupon(
     issue_date: Date,
     maturity_date: Date,
     target_value: float,
-    r0: float,
+    rate_simulator: InterestRateSimulator,
     straight_bond_ytm: float,
     call_protection_years: int = 1,
     tolerance: float = 1e-4,
@@ -631,7 +629,7 @@ def solve_callable_bond_coupon(
         issue_date: Bond issue date
         maturity_date: Bond maturity date
         target_value: Target bond value
-        r0: Initial short rate for MTC
+        rate_simulator: InterestRateSimulator instance for Monte Carlo simulation
         straight_bond_ytm: Yield to maturity for straight bond
         call_protection_years: Years of call protection
         tolerance: Convergence tolerance
@@ -639,16 +637,6 @@ def solve_callable_bond_coupon(
     Returns:
         Tuple of (optimal_coupon_rate, solution_info)
     """
-
-    rate_simulator = InterestRateSimulator(
-        r0=r0,
-        mu=0,
-        sigma=0.15,
-        days=365 * 5,
-        num_paths=1000,
-        model="gbm",
-        kappa=0.1,
-    )
 
     def objective_function(coupon_rate: float) -> float:
         """Objective function: difference between callable bond value and target."""
@@ -670,7 +658,6 @@ def solve_callable_bond_coupon(
         callable_value, straight_value, stats = valuer.value_bond(
             valuation_date=issue_date, 
             straight_bond_ytm=straight_bond_ytm, 
-            num_simulations=1000
         )
 
         return callable_value - target_value
@@ -726,7 +713,6 @@ def solve_callable_bond_coupon(
         final_value, straight_value, stats = valuer.value_bond(
             valuation_date=issue_date, 
             straight_bond_ytm=straight_bond_ytm, 
-            num_simulations=1000
         )
 
         solution_info = {
@@ -806,11 +792,11 @@ def analyze_callable_bond_dynamics(
         rate_simulator = InterestRateSimulator(
             r0=equivalent_rate,
             mu=0,
-            sigma=0.15,
+            sigma=0.008,
             days=365 * 5,
             days_of_year=days_of_year,
             num_paths=1000,
-            model="gbm",
+            model="abw",
             kappa=0.1,
         )
         # Create valuer
@@ -856,35 +842,26 @@ def main():
     print(f"Call protection: 1 year")
     print()
 
-    # Test the new equivalent initial short rate calculation
-    print("\n=== Testing Equivalent Initial Short Rate Calculation ===")
 
-    # Test both discrete and continuous modes
-    for discount_mode in ["discrete", "continuous"]:
-        print(f"\n--- Testing {discount_mode.title()} Mode ---")
-        try:
-            equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
-                straight_bond=straight_bond,
-                dt=dt,
-                ytm=straight_bond_coupon,  # Use bond coupon as YTM
-                valuation_date=issue_date,
-                discount_mode=discount_mode,
-                tolerance=1e-6,
-            )
+    equivalent_rate, _ = CallableBondValuer.calculate_equivalent_initial_short_rate(
+        straight_bond=straight_bond,
+        dt=dt,
+        ytm=straight_bond_coupon,  # Use bond coupon as YTM
+        valuation_date=issue_date,
+        discount_mode="discrete",
+        tolerance=1e-6,
+    )
 
-            print(f"Input YTM: {solution_info['ytm']:.4%}")
-            print(
-                f"Equivalent short rate: {solution_info['equivalent_short_rate']:.4%}"
-            )
-            print(f"Rate difference: {solution_info['rate_difference']:.4%}")
-            print(f"Analytical PV: {solution_info['analytical_pv']:.6f}")
-            print(f"Monte Carlo PV: {solution_info['mc_pv']:.6f}")
-            print(f"Absolute error: {solution_info['error']:.8f}")
-            print(f"Relative error: {solution_info['relative_error']:.8%}")
-            print(f"Number of cash flows: {solution_info['num_cash_flows']}")
-
-        except Exception as e:
-            print(f"Error in {discount_mode} mode: {e}")
+    # Create rate simulator with equivalent rate
+    rate_simulator = InterestRateSimulator(
+        r0=equivalent_rate,
+        mu=0,
+        sigma=0.008,
+        days=365 * 5,
+        num_paths=5000,
+        model="abw",
+        kappa=0.1,
+    )
 
     try:
         # Analyze callable bond dynamics first
@@ -896,16 +873,16 @@ def main():
 
         # Solve for callable bond coupon using Monte Carlo optimization
         print("\n=== Solving for Callable Bond Coupon ===")
-        result = solve_callable_bond_coupon(
+        
+        optimal_coupon, solution_info = solve_callable_bond_coupon(
             issue_date=issue_date,
             maturity_date=maturity_date,
             target_value=target_value,
-            r0=equivalent_rate,
+            rate_simulator=rate_simulator,
             straight_bond_ytm=straight_bond_ytm,
             call_protection_years=1,
         )
 
-        optimal_coupon, solution_info = result
         print("\nSolution Results:")
         print(f"Optimal callable bond coupon: {optimal_coupon:.4%}")
         print(f"Callable bond value: {solution_info['callable_bond_value']:.4f}")

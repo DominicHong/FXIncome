@@ -8,7 +8,7 @@ globs: *.py
 ---
 ## Key Principles
 - **Operating System**: Windows. Use windows path format. Use Windows-compatible commands.
-- **Conciseness and Accuracy**: Write concise, technical responses with accurate Python examples.
+- **Test Code**: Write test code in different files. Do not mix test code and functional code in one file. Pytest files in the /tests directory are preferred.
 - **Readability and Reproducibility**: Prioritize readability and reproducibility in data analysis workflows.
 - **Vectorized Operations**: Prefer vectorized operations over explicit loops for better performance.
 - **Descriptive Variable Names**: Use descriptive variable names that reflect the data they contain.
