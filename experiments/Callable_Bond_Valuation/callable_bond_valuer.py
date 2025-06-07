@@ -9,139 +9,9 @@ from financepy.utils.date import Date
 from financepy.utils.frequency import FrequencyTypes
 from financepy.utils.day_count import DayCountTypes
 
-
-class InterestRateSimulator:
-    """A class for simulating interest rate movements using various models.
-
-    For MTC simulations, the interest rate is short rate. The overnight rate is recommended.
-
-    """
-
-    def __init__(
-        self,
-        r0: float = 0.043,  # Initial interest rate
-        mu: float = 0.0,  # Mean reversion level (for mean-reverting models)
-        sigma: float = 0.02,  # Volatility
-        days: int = 365
-        * 6,  # 5+1 years of simulation. 1 year buffer for discounting 5 year bond.
-        days_of_year: int = 365,
-        num_paths: int = 10000,
-        model: str = "vasicek",  # "vasicek", "cir", "gbm"
-        kappa: float = 0.1,  # Mean reversion speed
-    ):
-        """Initialize the interest rate simulator.
-
-        Args:
-            r0: Initial interest rate
-            mu: Long-term mean (for mean-reverting models)
-            sigma: Volatility parameter
-            days: Number of days to simulate
-            days_of_year: Days in a year (for time scaling)
-            num_paths: Number of Monte Carlo paths
-            model: Model type - "vasicek", "cir", or "gbm"
-            kappa: Mean reversion speed (for mean-reverting models)
-        """
-        self.r0 = r0
-        self.mu = mu
-        self.sigma = sigma
-        self.days = days
-        self.num_paths = num_paths
-        self.model = model
-        self.kappa = kappa
-        self.days_of_year = days_of_year
-        self._dt = 1 / self.days_of_year
-        self._sqrt_dt = np.sqrt(self._dt)
-        self.rates_df: pd.DataFrame | None = None
-
-    def generate_rates(self) -> pd.DataFrame:
-        """Generate interest rate paths using the specified model."""
-
-        rates = np.zeros((self.num_paths, self.days))
-        rates[:, 0] = self.r0
-
-        if self.model == "vasicek":
-            # Vasicek model: dr = kappa*(mu - r)*dt + sigma*dW
-            for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
-                rates[:, t] = (
-                    rates[:, t - 1]
-                    + self.kappa * (self.mu - rates[:, t - 1]) * self._dt
-                    + self.sigma * dW
-                )
-
-        elif self.model == "cir":
-            # Cox-Ingersoll-Ross model: dr = kappa*(mu - r)*dt + sigma*sqrt(r)*dW
-            for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
-                sqrt_r = np.maximum(np.sqrt(np.abs(rates[:, t - 1])), 1e-8)
-                rates[:, t] = (
-                    rates[:, t - 1]
-                    + self.kappa * (self.mu - rates[:, t - 1]) * self._dt
-                    + self.sigma * sqrt_r * dW
-                )
-                # Ensure non-negative rates
-                rates[:, t] = np.maximum(rates[:, t], 0.0001)
-
-        elif self.model == "abm":
-            # Arithmetic Brownian Motion: dr = mu*dt + sigma*dW
-            for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
-                rates[:, t] = rates[:, t - 1] + self.mu * self._dt + self.sigma * dW
-        
-        elif self.model == "gbm":
-            # Geometric Brownian Motion (continuous)
-            for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
-                rates[:, t] = rates[:, t - 1] * np.exp(
-                    (self.mu - 0.5 * self.sigma**2) * self._dt
-                    + self.sigma * dW
-                )
-        
-        else:
-            raise ValueError(f"Unknown model: {self.model}")
-
-        # Create DataFrame
-        try:
-            # Try to create a date index for plotting only for short simulations
-            if self.days <= 10000:
-                dates = pd.date_range(start="today", periods=self.days, freq="D")
-                self.rates_df = pd.DataFrame(
-                    rates.T,
-                    index=dates,
-                    columns=[f"path_{i+1}" for i in range(self.num_paths)],
-                )
-            else:
-                # For very long simulations, use numerical index
-                self.rates_df = pd.DataFrame(
-                    rates.T,
-                    index=np.arange(self.days),
-                    columns=[f"path_{i+1}" for i in range(self.num_paths)],
-                )
-        except (OverflowError, pd._libs.tslibs.np_datetime.OutOfBoundsTimedelta):
-            self.rates_df = pd.DataFrame(
-                rates.T,
-                index=np.arange(self.days),
-                columns=[f"path_{i+1}" for i in range(self.num_paths)],
-            )
-
-        return self.rates_df
-
-    def plot_rate_paths(self, max_paths: int = 50) -> None:
-        """Plot interest rate paths."""
-        if self.rates_df is None:
-            raise ValueError("No rate data available. Run generate_rates() first.")
-
-        plt.figure(figsize=(12, 6))
-        paths_to_plot = min(max_paths, len(self.rates_df.columns))
-        self.rates_df.iloc[:, :paths_to_plot].plot(
-            title=f"Interest Rate Simulation - {self.model.upper()} Model",
-            alpha=0.5,
-            legend=False,
-        )
-        plt.xlabel("Date")
-        plt.ylabel("Interest Rate")
-        plt.grid(True)
-        plt.show()
+from experiments.Callable_Bond_Valuation.interest_rate_simulator import (
+    InterestRateSimulator,
+)
 
 
 class CallableBond:
@@ -202,12 +72,12 @@ class CallableBond:
             call_date = call_date.add_years(1)
 
         return call_dates
-    
+
     def cashflow_since_date(self, date: Date) -> tuple[list[Date], list[float]]:
         """
         Get bond cash flows since a given date(exclusive).
         Cash flow on valuation date is received by the bond holder on the previous date.
-        FinancePy cash flows are per unit face value. 
+        FinancePy cash flows are per unit face value.
         The cashflow returned by this method is scaled by actual face value.
         Args:
             date: Date to get cash flows since
@@ -217,20 +87,17 @@ class CallableBond:
         # Get financepy bond cash flows and dates from the underlying bond
         # FinancePy Bond cash flows are per unit face value, so scale by actual face value
         financepy_cf_dates = self.bond.cpn_dts
-        financepy_cf_amounts = [
-            cf * self.face_value
-            for cf in self.bond.flow_amounts
-        ]
+        financepy_cf_amounts = [cf * self.face_value for cf in self.bond.flow_amounts]
         cf_dates = []
         cf_amounts = []
         for cf_date, cf_amount in zip(financepy_cf_dates, financepy_cf_amounts):
             if cf_date > date:
                 cf_dates.append(cf_date)
                 cf_amounts.append(cf_amount)
-        
+
         # FinancePy doesn't include principal in the final payment, add it manually
         cf_amounts[-1] += self.face_value
-        
+
         return cf_dates, cf_amounts
 
     def dirty_price_from_ytm(
@@ -303,7 +170,7 @@ class CallableBondValuer:
 
         for cf_date, cf_amount in zip(cash_flow_dates, cash_flow_amounts):
             # Cash flow on valuation date is received by the bond holder on the previous date
-            if cf_date <= valuation_date:  
+            if cf_date <= valuation_date:
                 continue
 
             # Calculate number of days from valuation_date to cf_date
@@ -353,7 +220,7 @@ class CallableBondValuer:
         """Calculate equivalent initial short rate for Monte Carlo simulation.
 
         This method finds a flat short rate that, when used in the Monte Carlo
-        discounting framework (CallableBondValuer.pv_of_future_cash_flows), 
+        discounting framework (CallableBondValuer.pv_of_future_cash_flows),
         produces the same present value as the analytical bond valuation.
 
         Args:
@@ -384,9 +251,11 @@ class CallableBondValuer:
             freq_type=straight_bond.freq_type,
             day_count_type=straight_bond.dc_type,
         )
-        
+
         # Use cashflow_since_date() to get bond cash flows
-        bond_cf_dates, bond_cf_amounts = callable_bond.cashflow_since_date(valuation_date)
+        bond_cf_dates, bond_cf_amounts = callable_bond.cashflow_since_date(
+            valuation_date
+        )
 
         def objective_function(flat_rate: float) -> float:
             """Objective function: difference between MC PV and analytical PV."""
@@ -459,7 +328,7 @@ class CallableBondValuer:
                 "ytm": ytm,
                 "rate_difference": equivalent_rate - ytm,
                 "discount_mode": discount_mode,
-                "num_cash_flows": len(bond_cf_dates)
+                "num_cash_flows": len(bond_cf_dates),
             }
 
             return equivalent_rate, solution_info
@@ -534,7 +403,9 @@ class CallableBondValuer:
             Tuple of (bond_value, was_called, call_info)
         """
         # Get all bond cash flows after valuation_date
-        bond_cf_dates, bond_cf_amounts = self.callable_bond.cashflow_since_date(valuation_date)
+        bond_cf_dates, bond_cf_amounts = self.callable_bond.cashflow_since_date(
+            valuation_date
+        )
 
         # Check each call date to see if bond should be called
         for call_date in self.callable_bond.call_dates:
@@ -543,14 +414,18 @@ class CallableBondValuer:
 
             # Calculate continuation value (value if not called at this call_date)
             # Use Monte Carlo discounting for consistency with the overall framework
-            
+
             # Get cash flows from call_date to maturity
-            continuation_cf_dates, continuation_cf_amounts = self.callable_bond.cashflow_since_date(call_date)
-            
+            continuation_cf_dates, continuation_cf_amounts = (
+                self.callable_bond.cashflow_since_date(call_date)
+            )
+
             # Extract rate path from call_date onwards
-            call_time_index = max(0, min(int(call_date - valuation_date), len(rate_path) - 1))
+            call_time_index = max(
+                0, min(int(call_date - valuation_date), len(rate_path) - 1)
+            )
             rate_path_from_call = rate_path[call_time_index:]
-            
+
             # Calculate continuation value using Monte Carlo discounting
             continuation_value = self.pv_of_future_cash_flows(
                 continuation_cf_dates,
@@ -558,7 +433,7 @@ class CallableBondValuer:
                 call_date,
                 rate_path_from_call,
                 self.rate_simulator._dt,
-                discount_mode="discrete"
+                discount_mode="discrete",
             )
 
             # Call value (par + premium)
@@ -573,8 +448,10 @@ class CallableBondValuer:
                 coupon_on_call_date = 0.0
 
                 # Get all bond cash flows from valuation_date onwards
-                cf_dates, cf_amounts = self.callable_bond.cashflow_since_date(valuation_date)
-                
+                cf_dates, cf_amounts = self.callable_bond.cashflow_since_date(
+                    valuation_date
+                )
+
                 # Process each cash flow from the bond
                 for cf_date, cf_amount in zip(cf_dates, cf_amounts):
                     if cf_date < call_date:
@@ -603,7 +480,11 @@ class CallableBondValuer:
                 effective_cf_amounts.append(call_price + coupon_on_call_date)
 
                 called_bond_value = self.pv_of_future_cash_flows(
-                    effective_cf_dates, effective_cf_amounts, valuation_date, rate_path, self.rate_simulator._dt
+                    effective_cf_dates,
+                    effective_cf_amounts,
+                    valuation_date,
+                    rate_path,
+                    self.rate_simulator._dt,
                 )
                 return (
                     called_bond_value,
@@ -619,55 +500,71 @@ class CallableBondValuer:
 
         # Use the already filtered cash flows (bond_cf_dates, bond_cf_amounts)
         not_called_bond_value = self.pv_of_future_cash_flows(
-            bond_cf_dates, bond_cf_amounts, valuation_date, rate_path, self.rate_simulator._dt
+            bond_cf_dates,
+            bond_cf_amounts,
+            valuation_date,
+            rate_path,
+            self.rate_simulator._dt,
         )
         return not_called_bond_value, False, {}
 
 
 def solve_callable_bond_coupon(
-    issue_date: Date,
-    maturity_date: Date,
-    target_value: float,
     rate_simulator: InterestRateSimulator,
+    straight_bond: Bond,
     straight_bond_ytm: float,
     call_protection_years: int = 1,
     tolerance: float = 1e-4,
 ) -> tuple[float, dict]:
-    """Solve for the coupon rate that makes callable bond value equal to target.
+    """Solve for the coupon rate that makes callable bond value equal to 100.
 
     Args:
-        issue_date: Bond issue date
-        maturity_date: Bond maturity date
-        target_value: Target bond value
         rate_simulator: InterestRateSimulator instance for Monte Carlo simulation
-        straight_bond_ytm: Yield to maturity for straight bond
+        straight_bond: Straight bond object to construct callable bond from
+        straight_bond_ytm: Fair ytm for straight bond
         call_protection_years: Years of call protection
         tolerance: Convergence tolerance
 
     Returns:
         Tuple of (optimal_coupon_rate, solution_info)
     """
+    target_value = 100.0
 
     def objective_function(coupon_rate: float) -> float:
         """Objective function: difference between callable bond value and target."""
 
-        # Create callable bond
+        # Create callable bond with different coupon rates
         callable_bond = CallableBond(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
+            issue_date=straight_bond.issue_dt,
+            maturity_date=straight_bond.maturity_dt,
             coupon_rate=coupon_rate,
             call_protection_years=call_protection_years,
-            freq_type=FrequencyTypes.ANNUAL,
-            day_count_type=DayCountTypes.THIRTY_E_360,
+            freq_type=straight_bond.freq_type,
+            day_count_type=straight_bond.dc_type,
         )
+        # Calculate equivalent initial short rate for the different coupon rates and same straight bond ytm
+        # Given the same straight bond ytm, the equivalent rates seem to be the same for all coupon rates.
+        equivalent_rate, _ = (
+            CallableBondValuer.calculate_equivalent_initial_short_rate(
+                straight_bond=callable_bond.bond,
+                dt=rate_simulator._dt,
+                ytm=straight_bond_ytm,
+                valuation_date=callable_bond.bond.issue_dt,
+                discount_mode="discrete",
+                tolerance=1e-6,
+            )
+        )
+
+        # Set the equivalent rate in the rate simulator
+        rate_simulator.r0 = equivalent_rate
 
         # Create valuer
         valuer = CallableBondValuer(callable_bond, rate_simulator)
 
         # Value the bond
-        callable_value, straight_value, stats = valuer.value_bond(
-            valuation_date=issue_date, 
-            straight_bond_ytm=straight_bond_ytm, 
+        callable_value, _, _ = valuer.value_bond(
+            valuation_date=straight_bond.issue_dt,
+            straight_bond_ytm=straight_bond_ytm,
         )
 
         return callable_value - target_value
@@ -711,18 +608,18 @@ def solve_callable_bond_coupon(
 
         # Get final solution info
         final_callable_bond = CallableBond(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
+            issue_date=straight_bond.issue_dt,
+            maturity_date=straight_bond.maturity_dt,
             coupon_rate=optimal_coupon,
             call_protection_years=call_protection_years,
-            freq_type=FrequencyTypes.ANNUAL,
-            day_count_type=DayCountTypes.THIRTY_E_360,
+            freq_type=straight_bond.freq_type,
+            day_count_type=straight_bond.dc_type,
         )
 
         valuer = CallableBondValuer(final_callable_bond, rate_simulator)
         final_value, straight_value, stats = valuer.value_bond(
-            valuation_date=issue_date, 
-            straight_bond_ytm=straight_bond_ytm, 
+            valuation_date=straight_bond.issue_dt,
+            straight_bond_ytm=straight_bond.cpn,
         )
 
         solution_info = {
@@ -742,9 +639,11 @@ def solve_callable_bond_coupon(
 
 
 def analyze_callable_bond_dynamics(
-    issue_date: Date,
-    maturity_date: Date,
+    rate_simulator: InterestRateSimulator,
+    straight_bond: Bond,
     straight_bond_ytm: float,
+    call_protection_years: int = 1,
+    num_simulations: int | None = None,
     coupon_range: list[float] = None,
 ) -> None:
     """Analyze the relationship between coupon rates and callable bond values."""
@@ -774,49 +673,43 @@ def analyze_callable_bond_dynamics(
     print(f"Coupon Rate | Straight Bond | Callable Bond | Option Value | Call Prob")
     print("-" * 70)
 
-
-    days_of_year = 365
-
     for coupon in coupon_range:
         # Create callable bond
         callable_bond = CallableBond(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
+            issue_date=straight_bond.issue_dt,
+            maturity_date=straight_bond.maturity_dt,
             coupon_rate=coupon,
-            call_protection_years=1,
-            freq_type=FrequencyTypes.ANNUAL,
-            day_count_type=DayCountTypes.THIRTY_E_360,
+            call_protection_years=call_protection_years,
+            freq_type=straight_bond.freq_type,
+            day_count_type=straight_bond.dc_type,
         )
 
         # Calculate equivalent initial short rate for different coupon rates
-        equivalent_rate, solution_info = CallableBondValuer.calculate_equivalent_initial_short_rate(
-            straight_bond=callable_bond.bond,
-            dt=1/days_of_year,
-            ytm=straight_bond_ytm,  
-            valuation_date=issue_date,
-            discount_mode="discrete",
-            tolerance=1e-6,
+        equivalent_rate, solution_info = (
+            CallableBondValuer.calculate_equivalent_initial_short_rate(
+                straight_bond=callable_bond.bond,
+                dt=rate_simulator._dt,
+                ytm=straight_bond_ytm,
+                valuation_date=callable_bond.bond.issue_dt,
+                discount_mode="discrete",
+                tolerance=1e-6,
+            )
         )
 
-        # Create rate simulator
-        rate_simulator = InterestRateSimulator(
-            r0=equivalent_rate,
-            mu=0,
-            sigma=0.0095,
-            days=365 * 5,
-            days_of_year=days_of_year,
-            num_paths=1000,
-            model="abm",
-            kappa=0.1,
-        )
+        # Set the equivalent rate in the rate simulator
+        rate_simulator.r0 = equivalent_rate
+
         # Create valuer
         valuer = CallableBondValuer(callable_bond, rate_simulator)
 
+        if num_simulations is None:
+            num_simulations = rate_simulator.num_paths
+
         # Value the bond
         callable_value, straight_value, stats = valuer.value_bond(
-            valuation_date=issue_date, 
-            straight_bond_ytm=straight_bond_ytm, 
-            num_simulations=1000
+            valuation_date=straight_bond.issue_dt,
+            straight_bond_ytm=straight_bond_ytm,
+            num_simulations=num_simulations,
         )
 
         print(
@@ -830,11 +723,11 @@ def main():
     print("=== Callable Bond Valuer Implementation Test ===\n")
     issue_date = Date(27, 5, 2025)
     maturity_date = Date(27, 5, 2030)  # 5 years
+    days = int(maturity_date - issue_date) + 2
+    days_of_year = 365
 
-    # Parameters from the problem
     straight_bond_coupon = 0.046  # 4.60%
     straight_bond_ytm = straight_bond_coupon  # 4.60%
-    dt = 1/365
 
     # Create a straight bond for testing
     straight_bond = Bond(
@@ -844,30 +737,20 @@ def main():
         freq_type=FrequencyTypes.ANNUAL,
         dc_type=DayCountTypes.THIRTY_E_360,
     )
-    target_value = 100
 
     print("Problem Parameters:")
     print(f"Straight bond coupon: {straight_bond_coupon:.2%}")
-    print(f"Target bond value: {target_value}")
+    print(f"Target bond value: 100")
     print(f"Call protection: 1 year")
     print()
 
-
-    equivalent_rate, _ = CallableBondValuer.calculate_equivalent_initial_short_rate(
-        straight_bond=straight_bond,
-        dt=dt,
-        ytm=straight_bond_coupon,  # Use bond coupon as YTM
-        valuation_date=issue_date,
-        discount_mode="discrete",
-        tolerance=1e-6,
-    )
-
     # Create rate simulator with equivalent rate
     rate_simulator = InterestRateSimulator(
-        r0=equivalent_rate,
+        r0=0,  # It will be set to the equivalent rate in solve_callable_bond_coupon() and analyze_callable_bond_dynamics()
         mu=0,
         sigma=0.0095,
-        days=365 * 5,
+        days=days,
+        days_of_year=days_of_year,
         num_paths=5000,
         model="abm",
         kappa=0.1,
@@ -876,19 +759,18 @@ def main():
     try:
         # Analyze callable bond dynamics first
         analyze_callable_bond_dynamics(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
+            rate_simulator=rate_simulator,
+            straight_bond=straight_bond,
             straight_bond_ytm=straight_bond_ytm,
+            call_protection_years=1,
         )
 
         # Solve for callable bond coupon using Monte Carlo optimization
         print("\n=== Solving for Callable Bond Coupon ===")
-        
+
         optimal_coupon, solution_info = solve_callable_bond_coupon(
-            issue_date=issue_date,
-            maturity_date=maturity_date,
-            target_value=target_value,
             rate_simulator=rate_simulator,
+            straight_bond=straight_bond,
             straight_bond_ytm=straight_bond_ytm,
             call_protection_years=1,
         )
@@ -903,7 +785,7 @@ def main():
         print(f"Call probability: {solution_info['call_probability']:.2%}")
 
         print(
-            f"\nConclusion: To achieve a bond value of {target_value:.0f}, "
+            f"\nConclusion: To achieve a bond value of 100, "
             f"the callable bond should have a coupon rate of {optimal_coupon:.4%}."
         )
 
@@ -912,7 +794,6 @@ def main():
         import traceback
 
         traceback.print_exc()
-        print("Debugging information printed above.")
 
 
 if __name__ == "__main__":

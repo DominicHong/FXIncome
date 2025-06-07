@@ -3,8 +3,8 @@ import numpy as np
 from experiments.Callable_Bond_Valuation.callable_bond_valuer import (
     CallableBond,
     CallableBondValuer,
-    InterestRateSimulator,
 )
+from experiments.Callable_Bond_Valuation.interest_rate_simulator import InterestRateSimulator
 
 from financepy.utils.date import Date
 from financepy.utils.frequency import FrequencyTypes
