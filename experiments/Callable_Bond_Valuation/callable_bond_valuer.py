@@ -9,9 +9,7 @@ from financepy.utils.date import Date
 from financepy.utils.frequency import FrequencyTypes
 from financepy.utils.day_count import DayCountTypes
 
-from experiments.Callable_Bond_Valuation.interest_rate_simulator import (
-    InterestRateSimulator,
-)
+from interest_rate_simulator import InterestRateSimulator
 
 
 class CallableBond:
@@ -530,10 +528,28 @@ def solve_callable_bond_coupon(
     """
     target_value = 100.0
 
+    # Calibrate the initial short rate to the straight bond market price
+    print("Calibrating rate model to straight bond...")
+    equivalent_rate, calib_info = (
+        CallableBondValuer.calculate_equivalent_initial_short_rate(
+            straight_bond=straight_bond,
+            dt=rate_simulator._dt,
+            ytm=straight_bond_ytm,
+            valuation_date=straight_bond.issue_dt,
+            discount_mode="discrete",
+            tolerance=1e-6,
+        )
+    )
+    print(f"Equivalent initial short rate (r0): {equivalent_rate:.4%}")
+    print(f"Calibration error: {calib_info['error']:.6f}")
+
+    # Set the calibrated rate in the simulator
+    rate_simulator.r0 = equivalent_rate
+
     def objective_function(coupon_rate: float) -> float:
         """Objective function: difference between callable bond value and target."""
 
-        # Create callable bond with different coupon rates
+        # Create callable bond with the trial coupon rate
         callable_bond = CallableBond(
             issue_date=straight_bond.issue_dt,
             maturity_date=straight_bond.maturity_dt,
@@ -542,21 +558,6 @@ def solve_callable_bond_coupon(
             freq_type=straight_bond.freq_type,
             day_count_type=straight_bond.dc_type,
         )
-        # Calculate equivalent initial short rate for the different coupon rates and same straight bond ytm
-        # Given the same straight bond ytm, the equivalent rates seem to be the same for all coupon rates.
-        equivalent_rate, _ = (
-            CallableBondValuer.calculate_equivalent_initial_short_rate(
-                straight_bond=callable_bond.bond,
-                dt=rate_simulator._dt,
-                ytm=straight_bond_ytm,
-                valuation_date=callable_bond.bond.issue_dt,
-                discount_mode="discrete",
-                tolerance=1e-6,
-            )
-        )
-
-        # Set the equivalent rate in the rate simulator
-        rate_simulator.r0 = equivalent_rate
 
         # Create valuer
         valuer = CallableBondValuer(callable_bond, rate_simulator)
@@ -619,7 +620,7 @@ def solve_callable_bond_coupon(
         valuer = CallableBondValuer(final_callable_bond, rate_simulator)
         final_value, straight_value, stats = valuer.value_bond(
             valuation_date=straight_bond.issue_dt,
-            straight_bond_ytm=straight_bond.cpn,
+            straight_bond_ytm=straight_bond_ytm,
         )
 
         solution_info = {
@@ -631,6 +632,8 @@ def solve_callable_bond_coupon(
             "option_value": stats["option_value"],
             "call_probability": stats["call_probability"],
         }
+        rate_simulator.generate_rates()
+        rate_simulator.plot_rate_paths(max_paths=50)
 
         return optimal_coupon, solution_info
 
@@ -668,6 +671,24 @@ def analyze_callable_bond_dynamics(
             0.08,
         ]
 
+    # Calibrate the initial short rate ONCE to the straight bond
+    print("\nCalibrating rate model to straight bond for analysis...")
+    equivalent_rate, calib_info = (
+        CallableBondValuer.calculate_equivalent_initial_short_rate(
+            straight_bond=straight_bond,
+            dt=rate_simulator._dt,
+            ytm=straight_bond_ytm,
+            valuation_date=straight_bond.issue_dt,
+            discount_mode="discrete",
+            tolerance=1e-6,
+        )
+    )
+    print(f"Equivalent initial short rate (r0): {equivalent_rate:.4%}")
+    print(f"Calibration error: {calib_info['error']:.6f}\n")
+
+    # Set the calibrated rate in the simulator
+    rate_simulator.r0 = equivalent_rate
+
     print("=== Callable Bond Dynamics Analysis ===")
     print(f"Straight bond YTM: {straight_bond_ytm:.2%}")
     print(f"Coupon Rate | Straight Bond | Callable Bond | Option Value | Call Prob")
@@ -683,21 +704,6 @@ def analyze_callable_bond_dynamics(
             freq_type=straight_bond.freq_type,
             day_count_type=straight_bond.dc_type,
         )
-
-        # Calculate equivalent initial short rate for different coupon rates
-        equivalent_rate, solution_info = (
-            CallableBondValuer.calculate_equivalent_initial_short_rate(
-                straight_bond=callable_bond.bond,
-                dt=rate_simulator._dt,
-                ytm=straight_bond_ytm,
-                valuation_date=callable_bond.bond.issue_dt,
-                discount_mode="discrete",
-                tolerance=1e-6,
-            )
-        )
-
-        # Set the equivalent rate in the rate simulator
-        rate_simulator.r0 = equivalent_rate
 
         # Create valuer
         valuer = CallableBondValuer(callable_bond, rate_simulator)
@@ -744,16 +750,17 @@ def main():
     print(f"Call protection: 1 year")
     print()
 
-    # Create rate simulator with equivalent rate
+    # Create rate simulator with market-consistent parameters
+    # r0 will be calibrated later to match the straight bond price
     rate_simulator = InterestRateSimulator(
-        r0=0,  # It will be set to the equivalent rate in solve_callable_bond_coupon() and analyze_callable_bond_dynamics()
-        mu=0,
-        sigma=0.0095,
+        r0=0,
+        mu=straight_bond_ytm,  # Set long-term mean to market YTM
+        sigma=0.10,
         days=days,
         days_of_year=days_of_year,
         num_paths=5000,
-        model="abm",
-        kappa=0.1,
+        model="cir",
+        kappa=2.0,
     )
 
     try:
