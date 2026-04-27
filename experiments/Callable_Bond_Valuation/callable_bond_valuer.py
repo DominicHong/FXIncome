@@ -727,13 +727,13 @@ def analyze_callable_bond_dynamics(
 def main():
     # Test the implementation with the specific scenario
     print("=== Callable Bond Valuer Implementation Test ===\n")
-    issue_date = Date(27, 5, 2025)
-    maturity_date = Date(27, 5, 2030)  # 5 years
+    issue_date = Date(11, 9, 2025)
+    maturity_date = Date(11, 9, 2035)  # 10 years
     days = int(maturity_date - issue_date) + 2
     days_of_year = 365
 
-    straight_bond_coupon = 0.046  # 4.60%
-    straight_bond_ytm = straight_bond_coupon  # 4.60%
+    straight_bond_coupon = 0.035  # 3.5%
+    straight_bond_ytm = straight_bond_coupon  
 
     # Create a straight bond for testing
     straight_bond = Bond(
@@ -755,7 +755,7 @@ def main():
     rate_simulator = InterestRateSimulator(
         r0=0,
         mu=0,  
-        sigma=0.00989,
+        sigma=0.0075,
         days=days,
         days_of_year=days_of_year,
         num_paths=5000,
