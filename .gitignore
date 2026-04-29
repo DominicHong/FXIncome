@@ -9,3 +9,4 @@ FXIncome.code-workspace
 .DS_Store
 .pytest_cache/
 *.xlsx
+experiments/bond_pnl_calculation/*.png
