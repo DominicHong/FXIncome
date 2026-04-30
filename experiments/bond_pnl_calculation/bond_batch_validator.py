@@ -86,7 +86,8 @@ def calculate_pnl_for_case(bond, buy_date, sell_date, buy_ytm, sell_ytm, maturit
             cpn_python_date = datetime(cpn_date.y, cpn_date.m, cpn_date.d).date()
             days_reinvest = (sell_date - cpn_python_date).days
             years_reinvest = days_reinvest / 365.0
-            reinvestment_value += cash_flow * (1 + reinvest_ytm * years_reinvest)
+            # reinvestment_value += cash_flow * (1 + reinvest_ytm * years_reinvest)
+            reinvestment_value += cash_flow
 
     actual_pnl = full_price_sell - full_price_buy + reinvestment_value
 
@@ -99,7 +100,7 @@ def calculate_pnl_for_case(bond, buy_date, sell_date, buy_ytm, sell_ytm, maturit
     delta_r = sell_ytm - buy_ytm
 
     # 公式损益中的P1需要加上票息及票息再投资收益
-    full_price_sell += reinvestment_value
+    # full_price_sell += reinvestment_value
 
     avg_md_price = (full_price_buy * md_buy + full_price_sell * md_sell) / 2
     duration_term = -avg_md_price * delta_r
