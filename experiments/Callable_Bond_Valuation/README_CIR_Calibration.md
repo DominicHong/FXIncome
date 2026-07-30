@@ -171,6 +171,8 @@ bond_value, straight_value, stats = valuer.value_bond(
 )
 ```
 
+The valuation engine uses the **Longstaff-Schwartz least-squares Monte Carlo** method to estimate the callable (Bermudan) price. At each call date the engine regresses the path-wise continuation value on `[1, r, r²]` using only the in-the-money paths (raw continuation `> call price`), then exercises wherever the fitted continuation exceeds the call price. For reproducibility, pass an explicit `seed` to the `InterestRateSimulator` (or to `value_bond(seed=...)`).
+
 ## Files
 
 - `interest_rate_simulator.py`: Main calibration and simulation functionality

@@ -23,6 +23,7 @@ class InterestRateSimulator:
         num_paths: int = 10000,
         model: str = "abm",  # "vasicek", "cir", "abm", "gbm"
         kappa: float = 0.1,  # Mean reversion speed
+        seed: int | None = None,  # Random seed for reproducibility
     ):
         """Initialize the interest rate simulator.
 
@@ -35,6 +36,7 @@ class InterestRateSimulator:
             num_paths: Number of Monte Carlo paths
             model: Model type - "vasicek", "cir", "abm", or "gbm"
             kappa: Mean reversion speed (for mean-reverting models)
+            seed: Random seed for reproducible paths (None = non-deterministic)
         """
         self.r0 = r0
         self.mu = mu
@@ -44,39 +46,52 @@ class InterestRateSimulator:
         self.model = model
         self.kappa = kappa
         self.days_of_year = days_of_year
+        self.seed = seed
         self._dt = 1 / self.days_of_year
         self._sqrt_dt = np.sqrt(self._dt)
+        self._rng: np.random.Generator | None = None
         self.rates_df: pd.DataFrame | None = None
 
-    def calibrate_cir_model(
+    def calibrate_model(
         self,
         historical_data: pd.DataFrame,
+        model: str = "cir",
         date_col: str = "date",
         rate_col: str = "rate",
     ) -> dict[str, float]:
-        """Calibrate CIR model parameters from historical yield data.
+        """Calibrate CIR or Vasicek model parameters from historical yield data.
 
-        The CIR model follows: dr = kappa * (theta - r) * dt + sigma * sqrt(r) * dW
-        Where theta is the long-term mean (stored as self.mu in this class).
+        Both models share the affine mean-reverting SDE form
+            dr = kappa * (theta - r) * dt + sigma * f(r) * dW
+        where
+            CIR:     f(r) = sqrt(r)  (rates stay positive; Feller condition applies)
+            Vasicek: f(r) = 1        (rates may turn negative; no Feller condition)
+
+        `theta` (long-term mean) is stored on the instance as ``self.mu``.
 
         Args:
             historical_data: DataFrame with historical yield data
+            model: "cir" or "vasicek"
             date_col: Name of the date column
-            rate_col: Name of the rate column (should be in decimal form, e.g., 0.05 for 5%)
+            rate_col: Name of the rate column (decimal form, e.g. 0.05 for 5%)
 
         Returns:
             Dictionary with calibrated parameters: {'kappa', 'theta', 'sigma', 'log_likelihood'}
         """
+        if model not in ("cir", "vasicek"):
+            raise ValueError(f"Unsupported model '{model}'. Use 'cir' or 'vasicek'.")
+
         # Ensure data is sorted by date in ascending order
         data = historical_data.copy().sort_values(date_col).reset_index(drop=True)
 
         # Convert rates to numpy array
         rates = data[rate_col].values
 
-        # Check for zero or negative rates (CIR requires positive rates)
-        if np.any(rates <= 0):
+        # Check for zero or negative rates (CIR requires positive rates; Vasicek tolerates them)
+        if model == "cir" and np.any(rates <= 0):
             raise ValueError(
-                "CIR model requires strictly positive rates. Found zero or negative rates in data."
+                "CIR model requires strictly positive rates. Found zero or negative "
+                "rates in data. Filter the data or use model='vasicek'."
             )
 
         # Calculate time differences (assuming daily data, convert to years)
@@ -87,94 +102,93 @@ class InterestRateSimulator:
             # Assume uniform daily spacing if dates are not datetime
             dt_values = np.full(len(rates) - 1, 1 / 365.25)
 
-        print(f"Calibrating CIR model with {len(dt_values)} data points...")
+        print(f"Calibrating {model.upper()} model with {len(dt_values)} data points...")
 
-        def cir_log_likelihood(params: np.ndarray) -> float:
-            """Calculate negative log-likelihood for CIR model."""
+        def _conditional_moments(
+            r_t: float, kappa: float, theta: float, sigma: float, dt: float
+        ) -> tuple[float, float]:
+            """Return (mean, variance) of r_{t+dt} conditional on r_t.
+
+            Uses the exact discrete-time transition for both models. The CIR
+            variance here is the exact non-central chi-square Gaussian
+            approximation (mean = r_t*exp(-k*dt) + theta*(1-exp(-k*dt)),
+            variance mixing terms from r_t and theta); Vasicek has a closed-form
+            Normal transition.
+            """
+            kappa_dt = min(kappa * dt, 10.0)  # cap to avoid exp overflow
+            exp_k = np.exp(-kappa_dt)
+            mean = r_t * exp_k + theta * (1.0 - exp_k)
+
+            if model == "vasicek":
+                if kappa > 1e-8:
+                    variance = (sigma**2 / (2.0 * kappa)) * (1.0 - np.exp(-2.0 * kappa_dt))
+                else:
+                    variance = sigma**2 * dt
+            else:  # cir
+                if kappa > 1e-8:
+                    variance = (sigma**2 * r_t / kappa) * (
+                        exp_k - np.exp(-2.0 * kappa_dt)
+                    ) + (theta * sigma**2 / (2.0 * kappa)) * (1.0 - exp_k) ** 2
+                else:
+                    variance = sigma**2 * r_t * dt
+
+            variance = max(variance, 1e-8)
+            return mean, variance
+
+        def neg_log_likelihood(params: np.ndarray) -> float:
+            """Negative log-likelihood for either CIR or Vasicek."""
             kappa, theta, sigma = params
 
-            # Parameter constraints - return large but finite penalty
             penalty = 1e6
             if kappa <= 0 or theta <= 0 or sigma <= 0:
                 return penalty
 
-            # Feller condition: 2*kappa*theta >= sigma^2 (with small tolerance)
-            if (
-                2 * kappa * theta < 0.9 * sigma**2
-            ):  # Allow slight violation for numerical stability
+            # Feller condition applies ONLY to CIR. Allow slight violation for stability.
+            if model == "cir" and 2 * kappa * theta < 0.9 * sigma**2:
                 return penalty
 
             log_likelihood = 0.0
             valid_observations = 0
 
-            # Adjust rates to match dt_values. The last rate is not used.
             for i in range(len(rates) - 1):
                 r_t = rates[i]
                 r_t1 = rates[i + 1]
                 dt = dt_values[i] if i < len(dt_values) else dt_values[-1]
 
-                # Ensure positive rates
-                r_t = max(r_t, 1e-6)
-                r_t1 = max(r_t1, 1e-6)
+                # CIR requires positive rates for the sqrt(r) term
+                if model == "cir":
+                    r_t = max(r_t, 1e-6)
+                    r_t1 = max(r_t1, 1e-6)
 
-                # Avoid extreme parameter values
-                kappa_dt = min(kappa * dt, 10)  # Cap to avoid exp overflow
-
-                # CIR Euler approximation with numerical stability
                 try:
-                    exp_kappa_dt = np.exp(-kappa_dt)
+                    mean, variance = _conditional_moments(r_t, kappa, theta, sigma, dt)
 
-                    # Mean of the transition
-                    mean = r_t * exp_kappa_dt + theta * (1 - exp_kappa_dt)
-
-                    # Variance of the transition
-                    if kappa > 1e-8:  # Avoid division by very small kappa
-                        var_term1 = (sigma**2 * r_t / kappa) * (
-                            exp_kappa_dt - np.exp(-2 * kappa_dt)
-                        )
-                        var_term2 = (theta * sigma**2 / (2 * kappa)) * (
-                            1 - exp_kappa_dt
-                        ) ** 2
-                        variance = var_term1 + var_term2
-                    else:
-                        # Fallback for very small kappa
-                        variance = sigma**2 * r_t * dt
-
-                    # Ensure positive variance with minimum threshold
-                    variance = max(variance, 1e-8)
-
-                    # Calculate log-likelihood contribution
                     residual = r_t1 - mean
                     log_likelihood_contrib = (
                         -0.5 * np.log(2 * np.pi * variance)
                         - 0.5 * (residual**2) / variance
                     )
 
-                    # Check for numerical validity
                     if np.isfinite(log_likelihood_contrib):
                         log_likelihood += log_likelihood_contrib
                         valid_observations += 1
 
                 except (OverflowError, ZeroDivisionError, FloatingPointError):
-                    # Skip this observation if numerical issues arise
                     continue
 
-            # Penalize if too few valid observations
             if valid_observations < len(rates) * 0.8:
                 return penalty
 
-            # Return negative log-likelihood (capped to avoid extreme values)
             result = -log_likelihood
             return min(result, penalty * 0.9)  # Cap to avoid infinite values
 
         # Initial parameter guesses
-        rate_mean = np.mean(rates)
-        rate_std = np.std(rates)
+        rate_mean = float(np.mean(rates))
+        rate_std = float(np.std(rates))
 
-        # Method of moments initial estimates
         initial_kappa = 0.1
-        initial_theta = rate_mean
-        initial_sigma = rate_std * 2
+        initial_theta = max(rate_mean, 0.001) if rate_mean > 0 else 0.03
+        initial_sigma = max(rate_std * 2, 0.001)
 
         initial_params = np.array([initial_kappa, initial_theta, initial_sigma])
 
@@ -186,67 +200,61 @@ class InterestRateSimulator:
         ]
 
         print(
-            f"Initial parameter estimates: kappa={initial_kappa:.4f}, theta={initial_theta:.4f}, sigma={initial_sigma:.4f}"
+            f"Initial parameter estimates: kappa={initial_kappa:.4f}, "
+            f"theta={initial_theta:.4f}, sigma={initial_sigma:.4f}"
         )
 
         # Optimize using multiple starting points for robustness
         best_result = None
         best_likelihood = np.inf
 
-        # Try multiple optimization methods and starting points
         methods = ["L-BFGS-B", "TNC"]
         np.random.seed(42)  # For reproducible results
 
         for method in methods:
             for attempt in range(5):  # More attempts for better convergence
                 try:
-                    # Generate diverse starting points
                     if attempt == 0:
-                        # Use initial method-of-moments estimates
                         start_params = initial_params.copy()
                     else:
-                        # Random perturbation of initial guess
-                        perturbation = 1 + 0.3 * (
-                            np.random.rand(3) - 0.5
-                        )  # ±15% variation
+                        perturbation = 1 + 0.3 * (np.random.rand(3) - 0.5)
                         start_params = initial_params * perturbation
                         start_params = np.clip(
-                            start_params, [b[0] for b in bounds], [b[1] for b in bounds]
+                            start_params,
+                            [b[0] for b in bounds],
+                            [b[1] for b in bounds],
                         )
 
-                    # Optimization options (method-specific)
                     if method == "L-BFGS-B":
                         options = {"maxiter": 2000, "ftol": 1e-9, "gtol": 1e-6}
                     elif method == "TNC":
                         options = {"maxfun": 3000, "ftol": 1e-9, "gtol": 1e-6}
 
                     result = optimize.minimize(
-                        cir_log_likelihood,
+                        neg_log_likelihood,
                         start_params,
                         method=method,
                         bounds=bounds,
                         options=options,
                     )
 
-                    # Check if this is the best result so far
                     if (
                         result.success
                         and np.isfinite(result.fun)
                         and result.fun < best_likelihood
                     ):
-                        # Additional validation: ensure parameters make sense
                         kappa_opt, theta_opt, sigma_opt = result.x
-                        if (
-                            kappa_opt > 0
-                            and theta_opt > 0
-                            and sigma_opt > 0
-                            and 2 * kappa_opt * theta_opt >= 0.8 * sigma_opt**2
-                        ):
-                            best_result = result
-                            best_likelihood = result.fun
-                            print(
-                                f"  Improved result found with {method}, attempt {attempt + 1}"
-                            )
+                        if kappa_opt > 0 and theta_opt > 0 and sigma_opt > 0:
+                            # Only CIR needs the Feller sanity check
+                            if model == "vasicek" or (
+                                2 * kappa_opt * theta_opt >= 0.8 * sigma_opt**2
+                            ):
+                                best_result = result
+                                best_likelihood = result.fun
+                                print(
+                                    f"  Improved result found with {method}, "
+                                    f"attempt {attempt + 1}"
+                                )
 
                 except Exception as e:
                     print(
@@ -258,48 +266,42 @@ class InterestRateSimulator:
             # Fallback to method of moments if optimization fails
             print("  Optimization failed, using method of moments estimates...")
 
-            # Enhanced method of moments for CIR
             dt_mean = np.mean(dt_values)
             rate_changes = np.diff(rates)
 
-            # Calculate sample statistics
             mean_rate = np.mean(rates[:-1])
-            mean_change = np.mean(rate_changes)
             var_change = np.var(rate_changes)
-            var_rate = np.var(rates[:-1])
 
-            # Method of moments estimates with better numerical stability
             try:
-                # Estimate mean reversion parameters
                 autocorr = (
-                    np.corrcoef(rates[:-1], rates[1:])[0, 1] if len(rates) > 2 else 0.9
+                    np.corrcoef(rates[:-1], rates[1:])[0, 1]
+                    if len(rates) > 2
+                    else 0.9
                 )
-                autocorr = max(0.1, min(0.99, autocorr))  # Ensure reasonable range
+                autocorr = max(0.1, min(0.99, autocorr))
 
-                # Estimate kappa from autocorrelation
                 kappa_est = -np.log(autocorr) / dt_mean
                 kappa_est = max(0.01, min(2.0, kappa_est))
 
-                # Estimate theta (long-term mean)
-                theta_est = mean_rate
+                theta_est = mean_rate if mean_rate > 0 else 0.03
                 theta_est = max(0.001, min(0.2, theta_est))
 
-                # Estimate sigma from residual variance
-                # For CIR: Var[dr] ≈ sigma² * r * dt
-                if mean_rate > 0:
-                    sigma_est = np.sqrt(var_change / (mean_rate * dt_mean))
-                else:
+                # Estimate sigma from residual variance:
+                #   CIR:     Var[dr] ~ sigma^2 * r * dt  -> sigma = sqrt(Var[dr]/(r_mean*dt))
+                #   Vasicek: Var[dr] ~ sigma^2 * dt       -> sigma = sqrt(Var[dr]/dt)
+                if model == "cir":
+                    sigma_est = (
+                        np.sqrt(var_change / (mean_rate * dt_mean))
+                        if mean_rate > 0
+                        else np.sqrt(var_change / dt_mean)
+                    )
+                    if 2 * kappa_est * theta_est < sigma_est**2:
+                        print("  Adjusting sigma to satisfy Feller condition...")
+                        sigma_est = np.sqrt(1.5 * kappa_est * theta_est)
+                else:  # vasicek
                     sigma_est = np.sqrt(var_change / dt_mean)
 
                 sigma_est = max(0.001, min(0.5, sigma_est))
-
-                # Verify Feller condition and adjust if necessary
-                if 2 * kappa_est * theta_est < sigma_est**2:
-                    print(f"  Adjusting sigma to satisfy Feller condition...")
-                    sigma_est = np.sqrt(
-                        1.5 * kappa_est * theta_est
-                    )  # Ensure Feller condition
-                    sigma_est = max(0.001, min(0.5, sigma_est))
 
             except Exception as e:
                 print(
@@ -313,7 +315,7 @@ class InterestRateSimulator:
                 "kappa": kappa_est,
                 "theta": theta_est,
                 "sigma": sigma_est,
-                "log_likelihood": -cir_log_likelihood(
+                "log_likelihood": -neg_log_likelihood(
                     [kappa_est, theta_est, sigma_est]
                 ),
             }
@@ -330,42 +332,64 @@ class InterestRateSimulator:
         self.kappa = calibrated_params["kappa"]
         self.mu = calibrated_params["theta"]  # Note: mu is used as theta in this class
         self.sigma = calibrated_params["sigma"]
-        self.model = "cir"
+        self.model = model
 
-        print(f"Calibrated CIR parameters:")
+        print(f"Calibrated {model.upper()} parameters:")
         print(f"  kappa (mean reversion speed): {calibrated_params['kappa']:.6f}")
         print(f"  theta (long-term mean): {calibrated_params['theta']:.6f}")
         print(f"  sigma (volatility): {calibrated_params['sigma']:.6f}")
         print(f"  Log-likelihood: {calibrated_params['log_likelihood']:.2f}")
 
-        # Verify Feller condition
-        feller_condition = 2 * calibrated_params["kappa"] * calibrated_params["theta"]
-        if feller_condition >= calibrated_params["sigma"] ** 2:
-            print(
-                f"  Feller condition satisfied: 2κθ = {feller_condition:.6f} >= σ² = {calibrated_params['sigma']**2:.6f}"
-            )
-        else:
-            print(
-                f"  WARNING: Feller condition violated: 2κθ = {feller_condition:.6f} < σ² = {calibrated_params['sigma']**2:.6f}"
-            )
-            print("  This may lead to negative interest rates in simulation.")
+        # Verify Feller condition (only for CIR; Vasicek tolerates negative rates)
+        if model == "cir":
+            feller_condition = 2 * calibrated_params["kappa"] * calibrated_params["theta"]
+            if feller_condition >= calibrated_params["sigma"] ** 2:
+                print(
+                    f"  Feller condition satisfied: 2*kappa*theta = {feller_condition:.6f} "
+                    f">= sigma^2 = {calibrated_params['sigma']**2:.6f}"
+                )
+            else:
+                print(
+                    f"  WARNING: Feller condition violated: 2*kappa*theta = {feller_condition:.6f} "
+                    f"< sigma^2 = {calibrated_params['sigma']**2:.6f}"
+                )
+                print("  This may lead to negative interest rates in simulation.")
+        else:  # vasicek
+            print("  Feller condition not applicable (Vasicek allows negative rates).")
 
         return calibrated_params
+
+    def calibrate_cir_model(
+        self,
+        historical_data: pd.DataFrame,
+        date_col: str = "date",
+        rate_col: str = "rate",
+    ) -> dict[str, float]:
+        """Backward-compatible wrapper for calibrate_model(model='cir').
+
+        New code should call calibrate_model(data, model='cir' | 'vasicek') directly.
+        """
+        return self.calibrate_model(
+            historical_data, model="cir", date_col=date_col, rate_col=rate_col
+        )
 
     def load_and_calibrate_from_csv(
         self,
         csv_path: str,
         start_date: datetime.datetime | None = None,
         end_date: datetime.datetime | None = None,
+        model: str = "cir",
         date_col: str = "date",
         rate_col: str = "rate",
     ) -> dict[str, float]:
-        """Load historical yield data from CSV and calibrate CIR model.
+        """Load historical yield data from CSV and calibrate a CIR or Vasicek model.
 
         Args:
             csv_path: Path to CSV file containing historical yield data
             start_date: Start date of the data. If None, use the first date in the data.
             end_date: End date of the data. If None, use the last date in the data.
+            model: Model to calibrate - "cir" (default) or "vasicek". CIR requires
+                strictly positive rates; Vasicek tolerates negative rates.
             date_col: Name of the date column in CSV
             rate_col: Name of the rate column in CSV
 
@@ -379,9 +403,15 @@ class InterestRateSimulator:
             # 2020-01-02,0.0152
             # ...
 
-            simulator = InterestRateSimulator(model="cir")
-            params = simulator.load_and_calibrate_from_csv("5yr_treasury_yields.csv")
+            # Vasicek
+            simulator = InterestRateSimulator(model="vasicek")
+            params = simulator.load_and_calibrate_from_csv(
+                "sofr_2020_2025.csv", model="vasicek"
+            )
         """
+        if model not in ("cir", "vasicek"):
+            raise ValueError(f"Unsupported model '{model}'. Use 'cir' or 'vasicek'.")
+
         try:
             # Load data from CSV
             historical_data = pd.read_csv(csv_path, parse_dates=[date_col])
@@ -417,8 +447,10 @@ class InterestRateSimulator:
                 print(f"Warning: {missing_rates} missing rates found")
                 historical_data = historical_data.dropna(subset=[rate_col])
 
-            # Calibrate model
-            return self.calibrate_cir_model(historical_data, date_col, rate_col)
+            # Calibrate the requested model
+            return self.calibrate_model(
+                historical_data, model=model, date_col=date_col, rate_col=rate_col
+            )
 
         except FileNotFoundError:
             print(f"Error: File not found: {csv_path}")
@@ -440,10 +472,15 @@ class InterestRateSimulator:
         rates = np.zeros((self.num_paths, self.days))
         rates[:, 0] = self.r0
 
+        # Use a dedicated Generator so results are reproducible when self.seed is set.
+        # Re-creating the Generator on every call ensures two calls with the same
+        # seed produce identical paths (useful for fair before/after comparisons).
+        self._rng = np.random.default_rng(self.seed)
+
         if self.model == "vasicek":
             # Vasicek model: dr = kappa*(mu - r)*dt + sigma*dW
             for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
+                dW = self._rng.normal(0, 1, size=self.num_paths) * self._sqrt_dt
                 rates[:, t] = (
                     rates[:, t - 1]
                     + self.kappa * (self.mu - rates[:, t - 1]) * self._dt
@@ -453,7 +490,7 @@ class InterestRateSimulator:
         elif self.model == "cir":
             # Cox-Ingersoll-Ross model: dr = kappa*(mu - r)*dt + sigma*sqrt(r)*dW
             for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
+                dW = self._rng.normal(0, 1, size=self.num_paths) * self._sqrt_dt
                 sqrt_r = np.maximum(np.sqrt(np.abs(rates[:, t - 1])), 1e-8)
                 rates[:, t] = (
                     rates[:, t - 1]
@@ -466,13 +503,13 @@ class InterestRateSimulator:
         elif self.model == "abm":
             # Arithmetic Brownian Motion: dr = mu*dt + sigma*dW
             for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
+                dW = self._rng.normal(0, 1, size=self.num_paths) * self._sqrt_dt
                 rates[:, t] = rates[:, t - 1] + self.mu * self._dt + self.sigma * dW
 
         elif self.model == "gbm":
             # Geometric Brownian Motion (continuous)
             for t in range(1, self.days):
-                dW = np.random.normal(0, 1, size=self.num_paths) * self._sqrt_dt
+                dW = self._rng.normal(0, 1, size=self.num_paths) * self._sqrt_dt
                 rates[:, t] = rates[:, t - 1] * np.exp(
                     (self.mu - 0.5 * self.sigma**2) * self._dt + self.sigma * dW
                 )
@@ -672,7 +709,7 @@ def main():
     # date,rate
     # 2020-01-01,0.0150
     simulator.load_and_calibrate_from_csv(
-        csv_path="experiments/Callable_Bond_Valuation/5y_treasury_2020_2025.csv",
+        csv_path="experiments/Callable_Bond_Valuation/sofr_2020_2025.csv",
         start_date=datetime.datetime(2020, 1, 1),
         end_date=datetime.datetime(2025, 5, 27),
     )
@@ -698,8 +735,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # calculate_history_stats(
-    #     "experiments/Callable_Bond_Valuation/5y_treasury_2020_2025.csv",
-    #     datetime.datetime(2023, 1, 1),
-    #     datetime.datetime(2025, 5, 27),
-    # )

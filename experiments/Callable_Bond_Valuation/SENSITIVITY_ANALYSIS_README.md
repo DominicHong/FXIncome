@@ -32,7 +32,7 @@ issue_date = Date(27, 5, 2025)
 maturity_date = Date(27, 5, 2030)  # 5 years
 base_coupon_rate = 0.046  # 4.6%
 base_straight_bond_ytm = 0.046  # 4.6%
-base_sigma = 0.0095  # 0.95%
+base_sigma = 0.0105  # ~105 bps, calibrated from 5y_treasury_2020_2025.csv
 
 # Create analyzer
 analyzer = CallableBondSensitivityAnalyzer(
@@ -106,16 +106,17 @@ For each parameter variation, the analysis tracks:
 ### Valuation Approach
 
 1. **Equivalent Rate Calculation**: For each parameter combination, calculates the equivalent initial short rate that matches the straight bond YTM using the Monte Carlo framework
-2. **Rate Path Generation**: Generates interest rate paths using Arithmetic Brownian Motion (ABM) model
-3. **Path-Dependent Valuation**: Values the callable bond along each rate path, checking call conditions at each call date
+2. **Rate Path Generation**: Generates interest rate paths using a stochastic short-rate model (default: Arithmetic Brownian Motion / ABM; Vasicek and CIR are supported and selected via the `InterestRateSimulator.model` parameter)
+3. **Longstaff-Schwartz LSM Valuation**: Values the callable bond with backward induction. At each call date, the continuation value (PV of all remaining straight-bond cash flows under the already-decided future policy) is regressed against the short rate using only the in-the-money paths. The issuer exercises whenever the fitted continuation exceeds the call price; this yields an unbiased estimate of the Bermudan call-option value.
 4. **Statistical Aggregation**: Computes mean values and call statistics across all simulation paths
 
 ### Call Decision Logic
 
-The issuer calls the bond when:
-- Current date is a valid call date (after call protection period)
-- Continuation value > Call price × (1 + buffer)
-- Buffer of 2% is used to account for transaction costs
+The issuer calls the bond at call date `t_k` when:
+- `t_k` is a valid call date (after the call protection period)
+- The fitted continuation value `C_hat(r_{t_k})` from the LSM regression exceeds the call price `K = face_value + call_premium`
+
+The regression runs only on **in-the-money** paths (raw continuation `C > K`), using the basis `[1, r, r²]`. This is the standard Longstaff & Schwartz (2001) procedure; no buffer / spread is added — the optimal boundary is inferred directly from the cross-sectional fit.
 
 ### Discounting Method
 

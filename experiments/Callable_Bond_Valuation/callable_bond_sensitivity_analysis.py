@@ -28,6 +28,7 @@ class CallableBondSensitivityAnalyzer:
         base_coupon_rate: float,
         base_straight_bond_ytm: float,
         base_sigma: float,
+        base_kappa: float = 0.4464,
         call_protection_years: int = 1,
         face_value: float = 100.0,
         freq_type: FrequencyTypes = FrequencyTypes.ANNUAL,
@@ -43,6 +44,9 @@ class CallableBondSensitivityAnalyzer:
             base_coupon_rate: Base annual coupon rate
             base_straight_bond_ytm: Base straight bond YTM
             base_sigma: Base volatility for rate simulator
+            base_kappa: Mean reversion speed for the Vasicek short-rate model,
+                historically calibrated on 5Y treasury yields (see
+                interest_rate_simulator.load_and_calibrate_from_csv)
             call_protection_years: Years before bond becomes callable
             face_value: Face value of the bond
             freq_type: Coupon payment frequency
@@ -55,6 +59,7 @@ class CallableBondSensitivityAnalyzer:
         self.base_coupon_rate = base_coupon_rate
         self.base_straight_bond_ytm = base_straight_bond_ytm
         self.base_sigma = base_sigma
+        self.base_kappa = base_kappa
         self.call_protection_years = call_protection_years
         self.face_value = face_value
         self.freq_type = freq_type
@@ -89,21 +94,31 @@ class CallableBondSensitivityAnalyzer:
         self, 
         time_to_maturity_years: float, 
         sigma: float,
-        r0: float = 0.0
+        r0: float = 0.0,
+        kappa: float | None = None,
     ) -> InterestRateSimulator:
-        """Create an interest rate simulator with specified parameters."""
+        """Create an interest rate simulator with specified parameters.
+
+        Uses the mean-reverting Vasicek short-rate model. The long-term mean
+        ``mu`` is anchored to ``r0`` so the simulated distribution is centred
+        on the equivalent short rate; ``kappa`` (mean-reversion speed) defaults
+        to ``self.base_kappa``, the value historically calibrated on 5Y treasury
+        yields (see interest_rate_simulator.load_and_calibrate_from_csv).
+        """
         days = int(time_to_maturity_years * 365.25) + 2
         days_of_year = 365
-        
+        if kappa is None:
+            kappa = self.base_kappa
+
         return InterestRateSimulator(
             r0=r0,
-            mu=0,
+            mu=r0,
             sigma=sigma,
             days=days,
             days_of_year=days_of_year,
             num_paths=self.num_simulations,
-            model="abm",
-            kappa=0.1,
+            model="vasicek",
+            kappa=kappa,
         )
     
     def _value_callable_bond(
@@ -136,8 +151,15 @@ class CallableBondSensitivityAnalyzer:
         )
         
         # Create rate simulator with equivalent rate
-        rate_simulator = self._create_rate_simulator(time_to_maturity_years, sigma, equivalent_rate)
-        
+        rate_simulator = self._create_rate_simulator(
+            time_to_maturity_years, sigma, equivalent_rate, self.base_kappa
+        )
+        # For mean-reverting models (Vasicek/CIR) anchor the long-term mean to
+        # the calibrated r0 so the simulated distribution is centred correctly.
+        # ABM is left untouched (no long-term mean parameter).
+        if rate_simulator.model in ("vasicek", "cir"):
+            rate_simulator.mu = equivalent_rate
+
         # Create valuer and value the bond
         valuer = CallableBondValuer(callable_bond, rate_simulator, self.call_premium)
         
@@ -589,7 +611,10 @@ def main():
     maturity_date = Date(27, 5, 2030)  # 5 years
     base_coupon_rate = 0.046  # 4.6%
     base_straight_bond_ytm = 0.046  # 4.6%
-    base_sigma = 0.0095  # 0.95%
+    base_sigma = 0.0105  # ~105 bps, calibrated from 5y_treasury_2020_2025.csv
+    # Mean reversion speed for the Vasicek short-rate model.
+    # Calibrated on 5y_treasury_2020_2025.csv (see interest_rate_simulator for details).
+    base_kappa = 1.0
     
     # Create sensitivity analyzer
     analyzer = CallableBondSensitivityAnalyzer(
@@ -598,54 +623,49 @@ def main():
         base_coupon_rate=base_coupon_rate,
         base_straight_bond_ytm=base_straight_bond_ytm,
         base_sigma=base_sigma,
+        base_kappa=base_kappa,
         call_protection_years=1,
         num_simulations=10000,  # Reduced for faster execution
     )
     
-    try:
-        # Run full sensitivity analysis
-        logger.info("Starting comprehensive sensitivity analysis...")
-        
-        # Define custom ranges for more targeted analysis
-        coupon_range = np.arange(0.01, 0.10, 0.005).tolist()  # 1% to 10%
-        maturity_range = [3, 4, 5, 6, 7, 8, 10]  # Years
-        sigma_range = np.arange(0.005, 0.050, 0.0010).tolist()  # 0.5% to 5%
-        ytm_range = np.arange(0.01, 0.10, 0.005).tolist()  # 1% to 10%
-        
-        results = analyzer.run_full_sensitivity_analysis(
-            coupon_range=coupon_range,
-            maturity_years_range=maturity_range,
-            sigma_range=sigma_range,
-            ytm_range=ytm_range,
-        )
-        
-        # Generate and print report
-        report = analyzer.generate_sensitivity_report()
-        print(report)
-        
-        # Create plots
-        analyzer.create_sensitivity_plots(save_plots=True)
-        analyzer.create_call_probability_plots(save_plots=True)
-        
-        # Save results to CSV
-        analyzer.save_results_to_csv()
-        
-        # Print detailed results for each sensitivity analysis
-        print("\n" + "="*80)
-        print("DETAILED SENSITIVITY RESULTS")
-        print("="*80)
-        
-        for param_name, df in results.items():
-            print(f"\n{param_name.upper()} SENSITIVITY:")
-            print("-" * 40)
-            print(df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
-        
-        logger.info("Sensitivity analysis completed successfully!")
-        
-    except Exception as e:
-        logger.error(f"Error during sensitivity analysis: {e}")
-        import traceback
-        traceback.print_exc()
+    # Run full sensitivity analysis
+    logger.info("Starting comprehensive sensitivity analysis...")
+    
+    # Define custom ranges for more targeted analysis
+    coupon_range = np.arange(0.01, 0.10, 0.005).tolist()  # 1% to 10%
+    maturity_range = [3, 4, 5, 6, 7, 8, 10]  # Years
+    sigma_range = np.arange(0.005, 0.050, 0.0010).tolist()  # 0.5% to 5%
+    ytm_range = np.arange(0.01, 0.10, 0.005).tolist()  # 1% to 10%
+    
+    results = analyzer.run_full_sensitivity_analysis(
+        coupon_range=coupon_range,
+        maturity_years_range=maturity_range,
+        sigma_range=sigma_range,
+        ytm_range=ytm_range,
+    )
+    
+    # Generate and print report
+    report = analyzer.generate_sensitivity_report()
+    print(report)
+    
+    # Create plots
+    analyzer.create_sensitivity_plots(save_plots=True)
+    analyzer.create_call_probability_plots(save_plots=True)
+    
+    # Save results to CSV
+    analyzer.save_results_to_csv()
+    
+    # Print detailed results for each sensitivity analysis
+    print("\n" + "="*80)
+    print("DETAILED SENSITIVITY RESULTS")
+    print("="*80)
+    
+    for param_name, df in results.items():
+        print(f"\n{param_name.upper()} SENSITIVITY:")
+        print("-" * 40)
+        print(df.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+    
+    logger.info("Sensitivity analysis completed successfully!")
 
 
 if __name__ == "__main__":
