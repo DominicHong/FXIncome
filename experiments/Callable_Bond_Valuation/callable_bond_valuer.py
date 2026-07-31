@@ -186,17 +186,10 @@ class CallableBondValuer:
             end_idx = min(days_to_cf, max_path_idx)
 
             if end_idx < days_to_cf:
-                # The rate path is shorter than the time to this cash flow. The original
-                # implementation silently truncated the discounting here, which biases PV.
-                # We warn loudly so callers can extend the simulation horizon, while
-                # preserving the legacy behaviour for existing tests that rely on it.
-                warnings.warn(
+                raise ValueError(
                     "rate_path is shorter than the time to a cash flow date "
-                    f"(path length={max_path_idx}, days_to_cf={days_to_cf}); "
-                    "discounting will only cover up to len(rate_path). "
-                    "Increase InterestRateSimulator.days to cover the full bond life.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    f"(path length={max_path_idx}, days_to_cf={days_to_cf}). "
+                    "Increase InterestRateSimulator.days to cover the full bond life."
                 )
 
             relevant_rates = rate_path[0:end_idx]
@@ -349,6 +342,83 @@ class CallableBondValuer:
 
         except ValueError as e:
             raise ValueError(f"Could not find equivalent short rate: {e}")
+
+    @classmethod
+    def anchor_to_risk_neutral_measure(
+        cls,
+        rate_simulator: InterestRateSimulator,
+        straight_bond: Bond,
+        straight_bond_ytm: float,
+        overnight_rate_csv_path: str,
+    ) -> tuple[float, dict, float]:
+        """Re-anchor an InterestRateSimulator from P-measure to Q-measure.
+
+        A short-rate model needs two distinct anchors for risk-neutral
+        pricing; both are derived from *today's* market, not from history:
+
+            r0    : the instantaneous starting short rate. For a daily
+                    simulation this is today's actually observed overnight
+                    rate (e.g. SOFR), NOT the straight-bond YTM (which is a
+                    term-averaged quantity).
+            theta : the Q-measure long-term mean. We use the "equivalent
+                    short rate" - the flat rate that reproduces today's
+                    analytical straight-bond PV inside this MC discounting
+                    framework. Under a mean-reverting model this level is
+                    the natural Q-theta, so it overrides the P-measure theta
+                    produced by the historical SOFR calibration (which is
+                    not the right anchor for risk-neutral pricing).
+
+        `kappa` and `sigma` are KEPT from the historical P-measure
+        calibration - the standard simplifying assumption that volatility
+        and mean-reversion speed are (approximately) measure-invariant.
+
+        ABM/GBM are not mean-reverting (mu is a drift, not a reversion
+        level), so their `mu` is left untouched; only `r0` is re-anchored.
+
+        Args:
+            rate_simulator: Simulator whose kappa/sigma/mu(theta) have already
+                been calibrated to historical data (P-measure). Mutated in
+                place: r0 (and mu, for mean-reverting models) is overwritten.
+            straight_bond: FinancePy Bond used to derive the Q-measure theta.
+            straight_bond_ytm: Fair YTM of the straight bond on the issue date.
+            overnight_rate_csv_path: CSV with historical overnight rates
+                (columns ``date`` and ``rate``).
+
+        Returns:
+            Tuple of (equivalent_short_rate, calibration_info,
+            observed_overnight_rate).
+        """
+        # Q-theta: flat short rate that reproduces today's straight-bond PV.
+        print("Calibrating rate model long-term mean (theta) to straight bond...")
+        equivalent_rate, calib_info = (
+            cls.calculate_equivalent_initial_short_rate(
+                straight_bond=straight_bond,
+                dt=rate_simulator._dt,
+                ytm=straight_bond_ytm,
+                valuation_date=straight_bond.issue_dt,
+                discount_mode="discrete",
+                tolerance=1e-6,
+            )
+        )
+        print(f"Equivalent short rate (theta proxy): {equivalent_rate:.4%}")
+        print(f"Calibration error: {calib_info['error']:.6f}")
+
+        # r0: today's actually observed overnight rate.
+        overnight_rate = _load_overnight_rate_for_date(
+            straight_bond.issue_dt, overnight_rate_csv_path
+        )
+        print(
+            f"Observed overnight rate (r0) on {straight_bond.issue_dt}: "
+            f"{overnight_rate:.4%}"
+        )
+        rate_simulator.r0 = overnight_rate
+
+        # Mean-reverting models: anchor theta (mu) to the Q-measure equivalent
+        # rate. ABM/GBM: mu is a drift, not a reversion level - leave untouched.
+        if rate_simulator.model in ("vasicek", "cir"):
+            rate_simulator.mu = equivalent_rate
+
+        return equivalent_rate, calib_info, overnight_rate
 
     def value_bond(
         self,
@@ -688,43 +758,16 @@ def solve_callable_bond_coupon(
             os.path.dirname(os.path.abspath(__file__)), "sofr_2020_2025.csv"
         )
 
-    # Calibrate the long-term mean (theta) of the short-rate model to today's
-    # straight-bond market price. calculate_equivalent_initial_short_rate finds
-    # the flat short rate that reproduces the analytical bond PV; under a
-    # mean-reverting model this level corresponds to the Q-measure long-term
-    # mean (theta), NOT the instantaneous starting short rate r0.
-    print("Calibrating rate model long-term mean (theta) to straight bond...")
-    equivalent_rate, calib_info = (
-        CallableBondValuer.calculate_equivalent_initial_short_rate(
-            straight_bond=straight_bond,
-            dt=rate_simulator._dt,
-            ytm=straight_bond_ytm,
-            valuation_date=straight_bond.issue_dt,
-            discount_mode="discrete",
-            tolerance=1e-6,
-        )
+    # Re-anchor the simulator from P-measure to Q-measure: r0 := today's
+    # observed overnight rate, and theta (mu) := equivalent short rate that
+    # produces today's straight-bond PV. kappa/sigma are kept from the
+    # historical P-measure calibration.
+    CallableBondValuer.anchor_to_risk_neutral_measure(
+        rate_simulator=rate_simulator,
+        straight_bond=straight_bond,
+        straight_bond_ytm=straight_bond_ytm,
+        overnight_rate_csv_path=overnight_rate_csv_path,
     )
-    print(f"Equivalent short rate (theta proxy): {equivalent_rate:.4%}")
-    print(f"Calibration error: {calib_info['error']:.6f}")
-
-    # Anchor r0 to today's actually observed overnight rate (e.g. SOFR). The
-    # short-rate model describes the instantaneous rate; its starting value
-    # must be the realised overnight rate on the valuation date, not the
-    # YTM-equivalent level (which is a term-averaged quantity).
-    overnight_rate = _load_overnight_rate_for_date(
-        straight_bond.issue_dt, overnight_rate_csv_path
-    )
-    print(
-        f"Observed overnight rate (r0) on {straight_bond.issue_dt}: "
-        f"{overnight_rate:.4%}"
-    )
-    rate_simulator.r0 = overnight_rate
-
-    # Anchor theta (long-term mean) to the YTM-equivalent level for
-    # mean-reverting models. ABM/GBM have no mean-reversion anchor (mu is a
-    # drift, not a level), so they are left untouched.
-    if rate_simulator.model in ("vasicek", "cir"):
-        rate_simulator.mu = equivalent_rate
 
     def objective_function(coupon_rate: float) -> float:
         """Objective function: difference between callable bond value and target."""
@@ -857,41 +900,18 @@ def analyze_callable_bond_dynamics(
             0.08,
         ]
 
-    # Calibrate the long-term mean (theta) ONCE to today's straight-bond market
-    # price. The equivalent short rate corresponds to the Q-measure long-term
-    # mean (theta), NOT the instantaneous starting short rate r0.
-    print("\nCalibrating rate model long-term mean (theta) to straight bond...")
-    equivalent_rate, calib_info = (
-        CallableBondValuer.calculate_equivalent_initial_short_rate(
-            straight_bond=straight_bond,
-            dt=rate_simulator._dt,
-            ytm=straight_bond_ytm,
-            valuation_date=straight_bond.issue_dt,
-            discount_mode="discrete",
-            tolerance=1e-6,
-        )
+    # Re-anchor the simulator from P-measure to Q-measure: r0 := today's
+    # observed overnight rate, and theta (mu) := equivalent short rate that
+    # reproduces today's straight-bond PV. kappa/sigma are kept from the
+    # historical P-measure calibration.
+    print()
+    CallableBondValuer.anchor_to_risk_neutral_measure(
+        rate_simulator=rate_simulator,
+        straight_bond=straight_bond,
+        straight_bond_ytm=straight_bond_ytm,
+        overnight_rate_csv_path=overnight_rate_csv_path,
     )
-    print(f"Equivalent short rate (theta proxy): {equivalent_rate:.4%}")
-    print(f"Calibration error: {calib_info['error']:.6f}\n")
-
-    # Anchor r0 to today's actually observed overnight rate (e.g. SOFR). The
-    # short-rate model describes the instantaneous rate; its starting value
-    # must be the realised overnight rate on the valuation date, not the
-    # YTM-equivalent level (which is a term-averaged quantity).
-    overnight_rate = _load_overnight_rate_for_date(
-        straight_bond.issue_dt, overnight_rate_csv_path
-    )
-    print(
-        f"Observed overnight rate (r0) on {straight_bond.issue_dt}: "
-        f"{overnight_rate:.4%}\n"
-    )
-    rate_simulator.r0 = overnight_rate
-
-    # Anchor theta (long-term mean) to the YTM-equivalent level for
-    # mean-reverting models. ABM/GBM have no mean-reversion anchor (mu is a
-    # drift, not a level), so they are left untouched.
-    if rate_simulator.model in ("vasicek", "cir"):
-        rate_simulator.mu = equivalent_rate
+    print()
 
     print("=== Callable Bond Dynamics Analysis ===")
     print(f"Straight bond YTM: {straight_bond_ytm:.2%}")
@@ -959,27 +979,42 @@ def main():
         "sofr_2020_2025.csv",
     )
 
-    # Mean-reverting short-rate model (Vasicek) calibrated to historical SOFR data.
-    # `sigma` and `kappa` below are placeholders; they are overwritten by the
-    # historical calibration below (which estimates sigma_P and kappa_P on the
-    # SOFR series). Inside solve_callable_bond_coupon() /
-    # analyze_callable_bond_dynamics() the simulator is then re-anchored:
-    #   - r0  := today's observed overnight rate (SOFR), the instantaneous
-    #            starting short rate.
-    #   - mu  := equivalent short rate (the flat rate reproducing today's
-    #            straight-bond PV) -> acts as the Q-measure long-term mean
-    #            (theta). The historical-calibration theta above is overridden
-    #            because it lives in the P measure and is not the right anchor
-    #            for risk-neutral pricing.
+    # Mean-reverting short-rate model (Vasicek). The r0/mu/sigma/kappa values
+    # passed below are PLACEHOLDERS; they go through THREE initialisation
+    # layers, in this order:
+    #
+    #   Layer 1 - placeholders here (all four are dummy values, needed only
+    #             so the simulator can be constructed).
+    #
+    #   Layer 2 - P-measure historical calibration: load_and_calibrate_from_csv()
+    #             runs MLE on the SOFR series and overwrites kappa, sigma AND
+    #             mu (mu is stored as `theta` in InterestRateSimulator). r0 is
+    #             left at its placeholder (= ytm). These are real-world (P)
+    #             parameters.
+    #
+    #   Layer 3 - Q-measure re-anchoring: inside solve_callable_bond_coupon() /
+    #             analyze_callable_bond_dynamics(), via
+    #             CallableBondValuer.anchor_to_risk_neutral_measure(), the
+    #             simulator is re-anchored for risk-neutral pricing:
+    #               r0 := today's observed overnight rate (SOFR on the issue
+    #                     date) - the instantaneous starting short rate, NOT ytm.
+    #               mu := equivalent short rate - the flat rate that reproduces
+    #                     today's straight-bond PV in the MC discounting
+    #                     framework. For mean-reverting models this acts as the
+    #                     Q-measure long-term mean (theta), overriding the P-theta
+    #                     from Layer 2 (a P-theta is not the right Q anchor).
+    #             kappa and sigma are KEPT from Layer 2 - the standard
+    #             assumption that volatility and mean-reversion speed are
+    #             measure-invariant.
     rate_simulator = InterestRateSimulator(
-        r0=straight_bond_ytm,
-        mu=0.044951,   # placeholder, overwritten by historical calibration
-        sigma=0.0117,  # placeholder, overwritten by historical calibration
+        r0=straight_bond_ytm,     # placeholder -> Layer 3 overwrites with SOFR
+        mu=0.044951,              # placeholder -> Layer 2 (P-theta) -> Layer 3 (Q-theta)
+        sigma=0.0117,             # placeholder -> Layer 2 (P-sigma, kept in Layer 3)
         days=days,
         days_of_year=days_of_year,
         num_paths=5000,
         model="vasicek",
-        kappa=1.0,  # placeholder, overwritten by historical calibration
+        kappa=1.0,                # placeholder -> Layer 2 (P-kappa, kept in Layer 3)
     )
 
     print(f"Calibrating rate model to historical SOFR ({rate_simulator.model})...")
