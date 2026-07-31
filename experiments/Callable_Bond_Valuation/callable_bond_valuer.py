@@ -349,28 +349,28 @@ class CallableBondValuer:
         rate_simulator: InterestRateSimulator,
         straight_bond: Bond,
         straight_bond_ytm: float,
-        overnight_rate_csv_path: str,
-    ) -> tuple[float, dict, float]:
+    ) -> tuple[float, dict]:
         """Re-anchor an InterestRateSimulator from P-measure to Q-measure.
 
-        A short-rate model needs two distinct anchors for risk-neutral
-        pricing; both are derived from *today's* market, not from history:
+        We compute the "equivalent short rate" - the flat rate that
+        reproduces today's analytical straight-bond PV inside this MC
+        discounting framework - and set BOTH r0 and theta (mu) to it for
+        mean-reverting models (Vasicek/CIR).  This ensures:
 
-            r0    : the instantaneous starting short rate. For a daily
-                    simulation this is today's actually observed overnight
-                    rate (e.g. SOFR), NOT the straight-bond YTM (which is a
-                    term-averaged quantity).
-            theta : the Q-measure long-term mean. We use the "equivalent
-                    short rate" - the flat rate that reproduces today's
-                    analytical straight-bond PV inside this MC discounting
-                    framework. Under a mean-reverting model this level is
-                    the natural Q-theta, so it overrides the P-measure theta
-                    produced by the historical SOFR calibration (which is
-                    not the right anchor for risk-neutral pricing).
+        * The rate starts at its long-term mean: no deterministic drift
+          component at initiation.
+        * Mean reversion keeps the rate near this level on average.
+        * The straight-bond PV under the MC simulation approximately
+          equals the analytical PV the calibration was designed to match.
 
         `kappa` and `sigma` are KEPT from the historical P-measure
         calibration - the standard simplifying assumption that volatility
         and mean-reversion speed are (approximately) measure-invariant.
+
+        Caveat: when liquid swaption or bond-option data are available,
+        calibrate κ and σ to those Q-measure prices rather than relying on
+        historical P-measure estimates.  The values used here are a
+        practical fallback.
 
         ABM/GBM are not mean-reverting (mu is a drift, not a reversion
         level), so their `mu` is left untouched; only `r0` is re-anchored.
@@ -381,15 +381,11 @@ class CallableBondValuer:
                 place: r0 (and mu, for mean-reverting models) is overwritten.
             straight_bond: FinancePy Bond used to derive the Q-measure theta.
             straight_bond_ytm: Fair YTM of the straight bond on the issue date.
-            overnight_rate_csv_path: CSV with historical overnight rates
-                (columns ``date`` and ``rate``).
 
         Returns:
-            Tuple of (equivalent_short_rate, calibration_info,
-            observed_overnight_rate).
+            Tuple of (equivalent_short_rate, calibration_info).
         """
-        # Q-theta: flat short rate that reproduces today's straight-bond PV.
-        print("Calibrating rate model long-term mean (theta) to straight bond...")
+        print("Calibrating equivalent rate (r0 & Q-theta) to straight bond...")
         equivalent_rate, calib_info = (
             cls.calculate_equivalent_initial_short_rate(
                 straight_bond=straight_bond,
@@ -400,25 +396,18 @@ class CallableBondValuer:
                 tolerance=1e-6,
             )
         )
-        print(f"Equivalent short rate (theta proxy): {equivalent_rate:.4%}")
+        print(f"Equivalent short rate: {equivalent_rate:.4%}")
         print(f"Calibration error: {calib_info['error']:.6f}")
 
-        # r0: today's actually observed overnight rate.
-        overnight_rate = _load_overnight_rate_for_date(
-            straight_bond.issue_dt, overnight_rate_csv_path
-        )
-        print(
-            f"Observed overnight rate (r0) on {straight_bond.issue_dt}: "
-            f"{overnight_rate:.4%}"
-        )
-        rate_simulator.r0 = overnight_rate
+        rate_simulator.r0 = equivalent_rate
 
-        # Mean-reverting models: anchor theta (mu) to the Q-measure equivalent
-        # rate. ABM/GBM: mu is a drift, not a reversion level - leave untouched.
         if rate_simulator.model in ("vasicek", "cir"):
             rate_simulator.mu = equivalent_rate
+            print(f"Anchored r0 & theta (mu) = {equivalent_rate:.4%}")
+        else:
+            print(f"Anchored r0 = {equivalent_rate:.4%} (mu kept from P-measure)")
 
-        return equivalent_rate, calib_info, overnight_rate
+        return equivalent_rate, calib_info
 
     def value_bond(
         self,
@@ -685,57 +674,18 @@ class CallableBondValuer:
         return callable_bond_value, straight_bond_value, additional_stats
 
 
-def _load_overnight_rate_for_date(
-    valuation_date: Date, csv_path: str, date_col: str = "date", rate_col: str = "rate"
-) -> float:
-    """Load the observed overnight rate (e.g. SOFR) for a given valuation date.
-
-    The short-rate model describes the *instantaneous* interest rate, so its
-    starting value r0 must be today's actually observed overnight rate, not a
-    YTM-equivalent level (which is a term-averaged quantity).
-
-    If no record exists for the exact valuation date (e.g. weekend/holiday),
-    the most recent prior published rate is used, which is the standard
-    overnight-rate roll-back convention.
-
-    Args:
-        valuation_date: FinancePy Date for which to fetch the overnight rate.
-        csv_path: Path to a CSV with a date column and a decimal rate column.
-        date_col: Name of the date column in the CSV.
-        rate_col: Name of the rate column in the CSV (decimal form).
-
-    Returns:
-        Overnight rate as a decimal (e.g. 0.0431 for 4.31%).
-    """
-    df = pd.read_csv(csv_path, parse_dates=[date_col]).sort_values(date_col)
-    target = pd.Timestamp(valuation_date.datetime())
-    on_or_before = df[df[date_col] <= target]
-    if on_or_before.empty:
-        raise ValueError(
-            f"No overnight rate on or before {target.date()} in '{csv_path}'. "
-            "Extend the historical CSV or pass a different overnight_rate_csv_path."
-        )
-    row = on_or_before.iloc[-1]
-    rate = float(row[rate_col])
-    if row[date_col] != target:
-        warnings.warn(
-            f"No overnight rate published on {target.date()}; using the last "
-            f"available rate {rate:.4%} from {row[date_col].date()}.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    return rate
-
-
 def solve_callable_bond_coupon(
     rate_simulator: InterestRateSimulator,
     straight_bond: Bond,
     straight_bond_ytm: float,
     call_protection_years: int = 1,
     tolerance: float = 1e-4,
-    overnight_rate_csv_path: str | None = None,
 ) -> tuple[float, dict]:
     """Solve for the coupon rate that makes callable bond value equal to 100.
+
+    The rate simulator's r0 and mu (theta) are re-anchored to the
+    equivalent short rate via anchor_to_risk_neutral_measure() before
+    the optimisation begins.
 
     Args:
         rate_simulator: InterestRateSimulator instance for Monte Carlo simulation
@@ -743,30 +693,20 @@ def solve_callable_bond_coupon(
         straight_bond_ytm: Fair ytm for straight bond
         call_protection_years: Years of call protection
         tolerance: Convergence tolerance
-        overnight_rate_csv_path: Path to a CSV of observed overnight rates
-            (columns ``date`` and ``rate``). When ``None``, defaults to
-            ``sofr_2020_2025.csv`` next to this file. The simulator's r0 is
-            anchored to the rate observed on the bond's issue date.
 
     Returns:
         Tuple of (optimal_coupon_rate, solution_info)
     """
     target_value = 100.0
 
-    if overnight_rate_csv_path is None:
-        overnight_rate_csv_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "sofr_2020_2025.csv"
-        )
-
-    # Re-anchor the simulator from P-measure to Q-measure: r0 := today's
-    # observed overnight rate, and theta (mu) := equivalent short rate that
-    # produces today's straight-bond PV. kappa/sigma are kept from the
-    # historical P-measure calibration.
+    # Re-anchor the simulator from P-measure to Q-measure: r0 and theta (mu)
+    # are both set to the equivalent short rate (the flat rate reproducing
+    # today's straight-bond PV). kappa/sigma are kept from the historical
+    # P-measure calibration.
     CallableBondValuer.anchor_to_risk_neutral_measure(
         rate_simulator=rate_simulator,
         straight_bond=straight_bond,
         straight_bond_ytm=straight_bond_ytm,
-        overnight_rate_csv_path=overnight_rate_csv_path,
     )
 
     def objective_function(coupon_rate: float) -> float:
@@ -871,14 +811,8 @@ def analyze_callable_bond_dynamics(
     call_protection_years: int = 1,
     num_simulations: int | None = None,
     coupon_range: list[float] = None,
-    overnight_rate_csv_path: str | None = None,
 ) -> None:
     """Analyze the relationship between coupon rates and callable bond values."""
-
-    if overnight_rate_csv_path is None:
-        overnight_rate_csv_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "sofr_2020_2025.csv"
-        )
 
     if coupon_range is None:
         coupon_range = [
@@ -900,16 +834,15 @@ def analyze_callable_bond_dynamics(
             0.08,
         ]
 
-    # Re-anchor the simulator from P-measure to Q-measure: r0 := today's
-    # observed overnight rate, and theta (mu) := equivalent short rate that
-    # reproduces today's straight-bond PV. kappa/sigma are kept from the
-    # historical P-measure calibration.
+    # Re-anchor the simulator from P-measure to Q-measure: r0 and theta (mu)
+    # are both set to the equivalent short rate (the flat rate reproducing
+    # today's straight-bond PV). kappa/sigma are kept from the historical
+    # P-measure calibration.
     print()
     CallableBondValuer.anchor_to_risk_neutral_measure(
         rate_simulator=rate_simulator,
         straight_bond=straight_bond,
         straight_bond_ytm=straight_bond_ytm,
-        overnight_rate_csv_path=overnight_rate_csv_path,
     )
     print()
 
@@ -979,9 +912,8 @@ def main():
         "sofr_2020_2025.csv",
     )
 
-    # Mean-reverting short-rate model (Vasicek). The r0/mu/sigma/kappa values
-    # passed below are PLACEHOLDERS; they go through THREE initialisation
-    # layers, in this order:
+    # Short-rate model. The r0/mu/sigma/kappa values passed below are
+    # PLACEHOLDERS; they go through THREE initialisation layers, in this order:
     #
     #   Layer 1 - placeholders here (all four are dummy values, needed only
     #             so the simulator can be constructed).
@@ -989,25 +921,34 @@ def main():
     #   Layer 2 - P-measure historical calibration: load_and_calibrate_from_csv()
     #             runs MLE on the SOFR series and overwrites kappa, sigma AND
     #             mu (mu is stored as `theta` in InterestRateSimulator). r0 is
-    #             left at its placeholder (= ytm). These are real-world (P)
-    #             parameters.
+    #             left at its placeholder. These are real-world (P) parameters.
     #
     #   Layer 3 - Q-measure re-anchoring: inside solve_callable_bond_coupon() /
     #             analyze_callable_bond_dynamics(), via
     #             CallableBondValuer.anchor_to_risk_neutral_measure(), the
     #             simulator is re-anchored for risk-neutral pricing:
-    #               r0 := today's observed overnight rate (SOFR on the issue
-    #                     date) - the instantaneous starting short rate, NOT ytm.
-    #               mu := equivalent short rate - the flat rate that reproduces
-    #                     today's straight-bond PV in the MC discounting
-    #                     framework. For mean-reverting models this acts as the
-    #                     Q-measure long-term mean (theta), overriding the P-theta
-    #                     from Layer 2 (a P-theta is not the right Q anchor).
-    #             kappa and sigma are KEPT from Layer 2 - the standard
-    #             assumption that volatility and mean-reversion speed are
-    #             measure-invariant.
+    #               r0 & mu := equivalent short rate - the flat rate that
+    #                     reproduces today's straight-bond PV in the MC
+    #                     discounting framework. For mean-reverting models
+    #                     both r0 and theta (mu) are set to this rate, so the
+    #                     rate starts at its long-term mean and the straight
+    #                     bond PV under the MC simulation approximately matches
+    #                     the analytical PV the calibration targets.
+    #             κ (mean-reversion speed) and σ (volatility) are KEPT from
+    #             Layer 2 under the MEASURE-INVARIANCE ASSUMPTION: under a
+    #             Girsanov change of measure from P to Q, σ (the diffusion
+    #             coefficient) does not change, and κ (the speed of pullback)
+    #             is unaffected by the market price of risk — that premium is
+    #             absorbed entirely into θ.
+    #
+    #             CAVEAT: σ and κ are P-measure estimates from the SOFR time
+    #             series, NOT market-implied Q-measure estimates. For
+    #             production pricing they should ideally be calibrated to
+    #             liquid swaption or bond-option prices (which directly
+    #             reflect the Q measure). The historical estimates here are a
+    #             practical fallback when implied data is unavailable.
     rate_simulator = InterestRateSimulator(
-        r0=straight_bond_ytm,     # placeholder -> Layer 3 overwrites with SOFR
+        r0=0.044951,              # placeholder -> Layer 3 overwrites with equivalent_rate
         mu=0.044951,              # placeholder -> Layer 2 (P-theta) -> Layer 3 (Q-theta)
         sigma=0.0117,             # placeholder -> Layer 2 (P-sigma, kept in Layer 3)
         days=days,
@@ -1020,7 +961,7 @@ def main():
     print(f"Calibrating rate model to historical SOFR ({rate_simulator.model})...")
     rate_simulator.load_and_calibrate_from_csv(
         csv_path=csv_path,
-        start_date=datetime.datetime(2020, 1, 1),
+        start_date=datetime.datetime(2024, 1, 1),
         end_date=datetime.datetime(2025, 5, 27),
         model=rate_simulator.model,
     )

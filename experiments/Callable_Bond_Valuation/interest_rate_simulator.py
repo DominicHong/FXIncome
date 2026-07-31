@@ -2,8 +2,6 @@ import datetime
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy import optimize
-
 
 class InterestRateSimulator:
     """A class for simulating interest rate movements using various models.
@@ -59,27 +57,38 @@ class InterestRateSimulator:
         date_col: str = "date",
         rate_col: str = "rate",
     ) -> dict[str, float]:
-        """Calibrate CIR or Vasicek model parameters from historical yield data.
+        """Calibrate model parameters from historical yield data.
 
-        Both models share the affine mean-reverting SDE form
-            dr = kappa * (theta - r) * dt + sigma * f(r) * dW
-        where
-            CIR:     f(r) = sqrt(r)  (rates stay positive; Feller condition applies)
-            Vasicek: f(r) = 1        (rates may turn negative; no Feller condition)
+        Supported models:
+            CIR:     dr = kappa*(theta - r)*dt + sigma*sqrt(r)*dW
+                     (positive rates; Feller condition applies)
+            Vasicek: dr = kappa*(theta - r)*dt + sigma*dW
+                     (may turn negative)
+            ABM:     dr = mu*dt + sigma*dW
+                     (constant absolute vol; sigma same units as rate)
+            GBM:     dr = mu*r*dt + sigma*r*dW
+                     (constant proportional vol; sigma dimensionless)
 
-        `theta` (long-term mean) is stored on the instance as ``self.mu``.
+        For CIR/Vasicek `theta` (long-term mean) is stored as ``self.mu``
+        (for Vasicek, θ is a P-measure estimate typically overwritten by
+        Q-measure re-anchoring).
+        For ABM/GBM ``self.mu`` is the drift parameter.
+        CIR uses MLE with multi-start optimisation; Vasicek uses OLS
+        regression (Δr ~ r); ABM/GBM use closed-form MLE.
 
         Args:
             historical_data: DataFrame with historical yield data
-            model: "cir" or "vasicek"
+            model: "cir" (default), "vasicek", "abm" or "gbm"
             date_col: Name of the date column
             rate_col: Name of the rate column (decimal form, e.g. 0.05 for 5%)
 
         Returns:
-            Dictionary with calibrated parameters: {'kappa', 'theta', 'sigma', 'log_likelihood'}
+            Dictionary with calibrated parameters.
+            CIR/Vasicek: {'kappa', 'theta', 'sigma', 'log_likelihood'}
+            ABM/GBM:     {'mu', 'sigma', 'log_likelihood'}
         """
-        if model not in ("cir", "vasicek"):
-            raise ValueError(f"Unsupported model '{model}'. Use 'cir' or 'vasicek'.")
+        if model not in ("cir", "vasicek", "abm", "gbm"):
+            raise ValueError(f"Unsupported model '{model}'. Use 'cir', 'vasicek', 'abm' or 'gbm'.")
 
         # Ensure data is sorted by date in ascending order
         data = historical_data.copy().sort_values(date_col).reset_index(drop=True)
@@ -102,262 +111,212 @@ class InterestRateSimulator:
             # Assume uniform daily spacing if dates are not datetime
             dt_values = np.full(len(rates) - 1, 1 / 365.25)
 
-        print(f"Calibrating {model.upper()} model with {len(dt_values)} data points...")
+        if model in ("abm", "gbm"):
+            dr = np.diff(rates)
 
-        def _conditional_moments(
-            r_t: float, kappa: float, theta: float, sigma: float, dt: float
-        ) -> tuple[float, float]:
-            """Return (mean, variance) of r_{t+dt} conditional on r_t.
-
-            Uses the exact discrete-time transition for both models. The CIR
-            variance here is the exact non-central chi-square Gaussian
-            approximation (mean = r_t*exp(-k*dt) + theta*(1-exp(-k*dt)),
-            variance mixing terms from r_t and theta); Vasicek has a closed-form
-            Normal transition.
-            """
-            kappa_dt = min(kappa * dt, 10.0)  # cap to avoid exp overflow
-            exp_k = np.exp(-kappa_dt)
-            mean = r_t * exp_k + theta * (1.0 - exp_k)
-
-            if model == "vasicek":
-                if kappa > 1e-8:
-                    variance = (sigma**2 / (2.0 * kappa)) * (1.0 - np.exp(-2.0 * kappa_dt))
-                else:
-                    variance = sigma**2 * dt
-            else:  # cir
-                if kappa > 1e-8:
-                    variance = (sigma**2 * r_t / kappa) * (
-                        exp_k - np.exp(-2.0 * kappa_dt)
-                    ) + (theta * sigma**2 / (2.0 * kappa)) * (1.0 - exp_k) ** 2
-                else:
-                    variance = sigma**2 * r_t * dt
-
-            variance = max(variance, 1e-8)
-            return mean, variance
-
-        def neg_log_likelihood(params: np.ndarray) -> float:
-            """Negative log-likelihood for either CIR or Vasicek."""
-            kappa, theta, sigma = params
-
-            penalty = 1e6
-            if kappa <= 0 or theta <= 0 or sigma <= 0:
-                return penalty
-
-            # Feller condition applies ONLY to CIR. Allow slight violation for stability.
-            if model == "cir" and 2 * kappa * theta < 0.9 * sigma**2:
-                return penalty
-
-            log_likelihood = 0.0
-            valid_observations = 0
-
-            for i in range(len(rates) - 1):
-                r_t = rates[i]
-                r_t1 = rates[i + 1]
-                dt = dt_values[i] if i < len(dt_values) else dt_values[-1]
-
-                # CIR requires positive rates for the sqrt(r) term
-                if model == "cir":
-                    r_t = max(r_t, 1e-6)
-                    r_t1 = max(r_t1, 1e-6)
-
-                try:
-                    mean, variance = _conditional_moments(r_t, kappa, theta, sigma, dt)
-
-                    residual = r_t1 - mean
-                    log_likelihood_contrib = (
-                        -0.5 * np.log(2 * np.pi * variance)
-                        - 0.5 * (residual**2) / variance
-                    )
-
-                    if np.isfinite(log_likelihood_contrib):
-                        log_likelihood += log_likelihood_contrib
-                        valid_observations += 1
-
-                except (OverflowError, ZeroDivisionError, FloatingPointError):
-                    continue
-
-            if valid_observations < len(rates) * 0.8:
-                return penalty
-
-            result = -log_likelihood
-            return min(result, penalty * 0.9)  # Cap to avoid infinite values
-
-        # Initial parameter guesses
-        rate_mean = float(np.mean(rates))
-        rate_std = float(np.std(rates))
-
-        initial_kappa = 0.1
-        initial_theta = max(rate_mean, 0.001) if rate_mean > 0 else 0.03
-        initial_sigma = max(rate_std * 2, 0.001)
-
-        initial_params = np.array([initial_kappa, initial_theta, initial_sigma])
-
-        # Parameter bounds
-        bounds = [
-            (0.001, 5.0),  # kappa: mean reversion speed
-            (0.001, 0.07),  # theta: long-term mean
-            (0.001, 0.5),  # sigma: volatility
-        ]
-
-        print(
-            f"Initial parameter estimates: kappa={initial_kappa:.4f}, "
-            f"theta={initial_theta:.4f}, sigma={initial_sigma:.4f}"
-        )
-
-        # Optimize using multiple starting points for robustness
-        best_result = None
-        best_likelihood = np.inf
-
-        methods = ["L-BFGS-B", "TNC"]
-        np.random.seed(42)  # For reproducible results
-
-        for method in methods:
-            for attempt in range(5):  # More attempts for better convergence
-                try:
-                    if attempt == 0:
-                        start_params = initial_params.copy()
-                    else:
-                        perturbation = 1 + 0.3 * (np.random.rand(3) - 0.5)
-                        start_params = initial_params * perturbation
-                        start_params = np.clip(
-                            start_params,
-                            [b[0] for b in bounds],
-                            [b[1] for b in bounds],
-                        )
-
-                    if method == "L-BFGS-B":
-                        options = {"maxiter": 2000, "ftol": 1e-9, "gtol": 1e-6}
-                    elif method == "TNC":
-                        options = {"maxfun": 3000, "ftol": 1e-9, "gtol": 1e-6}
-
-                    result = optimize.minimize(
-                        neg_log_likelihood,
-                        start_params,
-                        method=method,
-                        bounds=bounds,
-                        options=options,
-                    )
-
-                    if (
-                        result.success
-                        and np.isfinite(result.fun)
-                        and result.fun < best_likelihood
-                    ):
-                        kappa_opt, theta_opt, sigma_opt = result.x
-                        if kappa_opt > 0 and theta_opt > 0 and sigma_opt > 0:
-                            # Only CIR needs the Feller sanity check
-                            if model == "vasicek" or (
-                                2 * kappa_opt * theta_opt >= 0.8 * sigma_opt**2
-                            ):
-                                best_result = result
-                                best_likelihood = result.fun
-                                print(
-                                    f"  Improved result found with {method}, "
-                                    f"attempt {attempt + 1}"
-                                )
-
-                except Exception as e:
-                    print(
-                        f"  Optimization attempt {attempt + 1} with {method} failed: {e}"
-                    )
-                    continue
-
-        if best_result is None or not best_result.success:
-            # Fallback to method of moments if optimization fails
-            print("  Optimization failed, using method of moments estimates...")
-
-            dt_mean = np.mean(dt_values)
-            rate_changes = np.diff(rates)
-
-            mean_rate = np.mean(rates[:-1])
-            var_change = np.var(rate_changes)
-
-            try:
-                autocorr = (
-                    np.corrcoef(rates[:-1], rates[1:])[0, 1]
-                    if len(rates) > 2
-                    else 0.9
+            if model == "gbm" and np.any(rates <= 0):
+                raise ValueError(
+                    "GBM model requires strictly positive rates. Found zero or "
+                    "negative rates in data. Filter the data or use a different "
+                    "model."
                 )
-                autocorr = max(0.1, min(0.99, autocorr))
 
-                kappa_est = -np.log(autocorr) / dt_mean
-                kappa_est = max(0.01, min(2.0, kappa_est))
+            print(
+                f"Calibrating {model.upper()} model with {len(dt_values)} "
+                f"data points..."
+            )
 
-                theta_est = mean_rate if mean_rate > 0 else 0.03
-                theta_est = max(0.001, min(0.2, theta_est))
-
-                # Estimate sigma from residual variance:
-                #   CIR:     Var[dr] ~ sigma^2 * r * dt  -> sigma = sqrt(Var[dr]/(r_mean*dt))
-                #   Vasicek: Var[dr] ~ sigma^2 * dt       -> sigma = sqrt(Var[dr]/dt)
-                if model == "cir":
-                    sigma_est = (
-                        np.sqrt(var_change / (mean_rate * dt_mean))
-                        if mean_rate > 0
-                        else np.sqrt(var_change / dt_mean)
-                    )
-                    if 2 * kappa_est * theta_est < sigma_est**2:
-                        print("  Adjusting sigma to satisfy Feller condition...")
-                        sigma_est = np.sqrt(1.5 * kappa_est * theta_est)
-                else:  # vasicek
-                    sigma_est = np.sqrt(var_change / dt_mean)
-
-                sigma_est = max(0.001, min(0.5, sigma_est))
-
-            except Exception as e:
-                print(
-                    f"  Method of moments calculation failed: {e}, using default values..."
-                )
-                kappa_est = 0.1
-                theta_est = mean_rate if mean_rate > 0 else 0.03
-                sigma_est = 0.02
-
-            calibrated_params = {
-                "kappa": kappa_est,
-                "theta": theta_est,
-                "sigma": sigma_est,
-                "log_likelihood": -neg_log_likelihood(
-                    [kappa_est, theta_est, sigma_est]
-                ),
-            }
-        else:
-            kappa_opt, theta_opt, sigma_opt = best_result.x
-            calibrated_params = {
-                "kappa": kappa_opt,
-                "theta": theta_opt,
-                "sigma": sigma_opt,
-                "log_likelihood": -best_result.fun,
-            }
-
-        # Update instance parameters
-        self.kappa = calibrated_params["kappa"]
-        self.mu = calibrated_params["theta"]  # Note: mu is used as theta in this class
-        self.sigma = calibrated_params["sigma"]
-        self.model = model
-
-        print(f"Calibrated {model.upper()} parameters:")
-        print(f"  kappa (mean reversion speed): {calibrated_params['kappa']:.6f}")
-        print(f"  theta (long-term mean): {calibrated_params['theta']:.6f}")
-        print(f"  sigma (volatility): {calibrated_params['sigma']:.6f}")
-        print(f"  Log-likelihood: {calibrated_params['log_likelihood']:.2f}")
-
-        # Verify Feller condition (only for CIR; Vasicek tolerates negative rates)
-        if model == "cir":
-            feller_condition = 2 * calibrated_params["kappa"] * calibrated_params["theta"]
-            if feller_condition >= calibrated_params["sigma"] ** 2:
-                print(
-                    f"  Feller condition satisfied: 2*kappa*theta = {feller_condition:.6f} "
-                    f">= sigma^2 = {calibrated_params['sigma']**2:.6f}"
-                )
+            if model == "abm":
+                mu_hat = np.sum(dr) / np.sum(dt_values)
+                residuals = dr - mu_hat * dt_values
             else:
-                print(
-                    f"  WARNING: Feller condition violated: 2*kappa*theta = {feller_condition:.6f} "
-                    f"< sigma^2 = {calibrated_params['sigma']**2:.6f}"
-                )
-                print("  This may lead to negative interest rates in simulation.")
-        else:  # vasicek
-            print("  Feller condition not applicable (Vasicek allows negative rates).")
+                log_returns = np.log(rates[1:] / rates[:-1])
+                mu_hat = np.sum(log_returns) / np.sum(dt_values)
+                residuals = log_returns - mu_hat * dt_values
 
-        return calibrated_params
+            sigma_sq_hat = np.mean(residuals**2 / dt_values)
+            sigma_hat = np.sqrt(sigma_sq_hat)
+
+            if model == "gbm":
+                mu_hat += 0.5 * sigma_sq_hat
+
+            n = len(dt_values)
+            log_likelihood = (
+                -0.5 * n * np.log(2 * np.pi)
+                - 0.5 * n * np.log(sigma_sq_hat)
+                - 0.5 * np.sum(np.log(dt_values))
+                - 0.5 * np.sum(residuals**2 / (sigma_sq_hat * dt_values))
+            )
+
+            calibrated_params = {
+                "mu": mu_hat,
+                "sigma": sigma_hat,
+                "log_likelihood": float(log_likelihood),
+            }
+
+            self.mu = mu_hat
+            self.sigma = sigma_hat
+            self.model = model
+
+            sigma_note = "(% vol)" if model == "gbm" else "(abs vol)"
+            print(
+                f"Calibrated {model.upper()} parameters (P-measure, historical):"
+            )
+            print(f"  mu (drift): {mu_hat:.6f}")
+            print(f"  sigma {sigma_note}: {sigma_hat:.6f}")
+            print(f"  Log-likelihood: {log_likelihood:.2f}")
+
+            return calibrated_params
+
+        if model == "vasicek":
+            dr = np.diff(rates)
+            r_levels = rates[:-1]
+
+            dt_avg = np.mean(dt_values)
+
+            # OLS discretisation of dr = κ(θ - r)·dt + σ·dW:
+            #   Δr_t = α + β·r_t + ε_t,  ε ~ N(0, σ²_resid)
+            #   κ̂ = -β/dt,  θ̂ = -α/β,  σ̂ = std(ε) / √dt
+            X = np.column_stack([np.ones(len(dr)), r_levels])
+            coeffs, _, _, _ = np.linalg.lstsq(X, dr, rcond=None)
+            alpha_hat, beta_hat = coeffs
+
+            residuals = dr - (alpha_hat + beta_hat * r_levels)
+
+            kappa_hat = -beta_hat / dt_avg
+            theta_hat = -alpha_hat / beta_hat
+            sigma_hat = np.std(residuals, ddof=0) / np.sqrt(dt_avg)
+
+            n = len(dr)
+            sigma2_mle = np.mean(residuals**2)
+            log_likelihood = -0.5 * n * (np.log(2 * np.pi * sigma2_mle) + 1)
+
+            calibrated_params = {
+                "kappa": kappa_hat,
+                "theta": theta_hat,
+                "sigma": sigma_hat,
+                "log_likelihood": float(log_likelihood),
+            }
+
+            self.kappa = kappa_hat
+            self.mu = theta_hat
+            self.sigma = sigma_hat
+            self.model = model
+
+            r_squared = 1 - np.var(residuals) / np.var(dr)
+            half_life_days = (
+                np.log(2) / kappa_hat if kappa_hat > 0 else np.inf
+            )
+
+            print(
+                f"Calibrated {model.upper()} parameters "
+                f"(P-measure, historical, OLS):"
+            )
+            print(f"  kappa (mean reversion speed): {kappa_hat:.6f}")
+            print(
+                f"  theta (long-term mean, P-measure ref): "
+                f"{theta_hat:.4%}"
+            )
+            print(f"  sigma (annualized vol): {sigma_hat:.4%}")
+            print(f"  R-squared: {r_squared:.4f}")
+            print(
+                f"  Half-life: {half_life_days:.1f} days "
+                f"({half_life_days / 365.25:.2f} years)"
+            )
+            print(f"  Log-likelihood: {log_likelihood:.2f}")
+
+            if kappa_hat <= 0:
+                print(
+                    "  WARNING: kappa <= 0 — no mean reversion detected. "
+                    "Consider model='abm'."
+                )
+
+            return calibrated_params
+
+        if model == "cir":
+            dr = np.diff(rates)
+            r_prev = rates[:-1]
+
+            r_prev_safe = np.maximum(r_prev, 1e-8)
+            sqrt_r = np.sqrt(r_prev_safe)
+            sqrt_dt = np.sqrt(dt_values)
+
+            # Homoskedastic-transformed regression:
+            #   Δr/(√r·√dt) = κθ·(√dt/√r) + (-κ)·(√r·√dt) + σ·ε
+            #   κ̂ = -b̂,  θ̂ = â/κ̂,  σ̂ = std(residuals)
+            z = dr / (sqrt_r * sqrt_dt)
+            w1 = sqrt_dt / sqrt_r
+            w2 = sqrt_r * sqrt_dt
+            X = np.column_stack([w1, w2])
+            coeffs, _, _, _ = np.linalg.lstsq(X, z, rcond=None)
+            a_hat, b_hat = coeffs
+
+            residuals = z - (a_hat * w1 + b_hat * w2)
+
+            kappa_hat = -b_hat
+            theta_hat = (
+                a_hat / kappa_hat if kappa_hat > 1e-12 else float("nan")
+            )
+            sigma_hat = np.std(residuals, ddof=0)
+
+            n = len(dr)
+            sigma2_mle = np.mean(residuals**2)
+            log_likelihood = -0.5 * n * (np.log(2 * np.pi * sigma2_mle) + 1)
+
+            calibrated_params = {
+                "kappa": kappa_hat,
+                "theta": theta_hat,
+                "sigma": sigma_hat,
+                "log_likelihood": float(log_likelihood),
+            }
+
+            self.kappa = kappa_hat
+            self.mu = theta_hat
+            self.sigma = sigma_hat
+            self.model = model
+
+            half_life_days = (
+                np.log(2) / kappa_hat if kappa_hat > 0 else np.inf
+            )
+
+            print(
+                f"Calibrated {model.upper()} parameters "
+                f"(P-measure, historical, OLS):"
+            )
+            print(f"  kappa (mean reversion speed): {kappa_hat:.6f}")
+            if not np.isnan(theta_hat):
+                print(
+                    f"  theta (long-term mean, P-measure ref): "
+                    f"{theta_hat:.4%}"
+                )
+            print(f"  sigma (volatility): {sigma_hat:.6f}")
+            print(
+                f"  Half-life: {half_life_days:.1f} days "
+                f"({half_life_days / 365.25:.2f} years)"
+            )
+
+            if not np.isnan(theta_hat):
+                feller = 2 * kappa_hat * theta_hat
+                if feller >= sigma_hat**2:
+                    print(
+                        f"  Feller: SATISFIED (2κθ = {feller:.6f} "
+                        f">= σ² = {sigma_hat**2:.6f})"
+                    )
+                else:
+                    print(
+                        f"  Feller: VIOLATED (2κθ = {feller:.6f} "
+                        f"< σ² = {sigma_hat**2:.6f})"
+                    )
+
+            print(f"  Log-likelihood: {log_likelihood:.2f}")
+
+            if kappa_hat <= 0:
+                print(
+                    "  WARNING: kappa <= 0 — no mean reversion detected. "
+                    "Consider model='abm'."
+                )
+
+            return calibrated_params
 
     def calibrate_cir_model(
         self,
@@ -382,19 +341,23 @@ class InterestRateSimulator:
         date_col: str = "date",
         rate_col: str = "rate",
     ) -> dict[str, float]:
-        """Load historical yield data from CSV and calibrate a CIR or Vasicek model.
+        """Load historical yield data from CSV and calibrate a rate model.
 
         Args:
             csv_path: Path to CSV file containing historical yield data
             start_date: Start date of the data. If None, use the first date in the data.
             end_date: End date of the data. If None, use the last date in the data.
-            model: Model to calibrate - "cir" (default) or "vasicek". CIR requires
-                strictly positive rates; Vasicek tolerates negative rates.
+            model: Model to calibrate - "cir" (default), "vasicek", "abm" or "gbm".
+                CIR/GBM require strictly positive rates; Vasicek/ABM tolerate
+                negative rates.  GBM sigma is proportional (dimensionless),
+                all others use absolute volatility.
             date_col: Name of the date column in CSV
             rate_col: Name of the rate column in CSV
 
         Returns:
-            Dictionary with calibrated parameters
+            Dictionary with calibrated parameters.
+            CIR/Vasicek: {'kappa', 'theta', 'sigma', 'log_likelihood'}
+            ABM/GBM:     {'mu', 'sigma', 'log_likelihood'}
 
         Example:
             # Your CSV should look like:
@@ -408,9 +371,14 @@ class InterestRateSimulator:
             params = simulator.load_and_calibrate_from_csv(
                 "sofr_2020_2025.csv", model="vasicek"
             )
+
+            # ABM
+            params = simulator.load_and_calibrate_from_csv(
+                "sofr_2020_2025.csv", model="abm"
+            )
         """
-        if model not in ("cir", "vasicek"):
-            raise ValueError(f"Unsupported model '{model}'. Use 'cir' or 'vasicek'.")
+        if model not in ("cir", "vasicek", "abm", "gbm"):
+            raise ValueError(f"Unsupported model '{model}'. Use 'cir', 'vasicek', 'abm' or 'gbm'.")
 
         try:
             # Load data from CSV
