@@ -54,7 +54,7 @@ class CallableBond:
             maturity_dt=maturity_date,
             coupon=coupon_rate,
             freq_type=freq_type,
-            dc_type=day_count_type,
+            accrual_dc_type=day_count_type,
         )
 
         # Calculate call dates (annual callable dates after protection period)
@@ -256,7 +256,7 @@ class CallableBondValuer:
             call_protection_years=0,  # No call protection for straight bond equivalent
             face_value=straight_bond.par,
             freq_type=straight_bond.freq_type,
-            day_count_type=straight_bond.dc_type,
+            day_count_type=straight_bond.accrual_dc_type,
         )
 
         # Use cashflow_since_date() to get bond cash flows
@@ -719,7 +719,7 @@ def solve_callable_bond_coupon(
             coupon_rate=coupon_rate,
             call_protection_years=call_protection_years,
             freq_type=straight_bond.freq_type,
-            day_count_type=straight_bond.dc_type,
+            day_count_type=straight_bond.accrual_dc_type,
         )
 
         # Create valuer
@@ -777,7 +777,7 @@ def solve_callable_bond_coupon(
             coupon_rate=optimal_coupon,
             call_protection_years=call_protection_years,
             freq_type=straight_bond.freq_type,
-            day_count_type=straight_bond.dc_type,
+            day_count_type=straight_bond.accrual_dc_type,
         )
 
         valuer = CallableBondValuer(final_callable_bond, rate_simulator)
@@ -859,7 +859,7 @@ def analyze_callable_bond_dynamics(
             coupon_rate=coupon,
             call_protection_years=call_protection_years,
             freq_type=straight_bond.freq_type,
-            day_count_type=straight_bond.dc_type,
+            day_count_type=straight_bond.accrual_dc_type,
         )
 
         # Create valuer
@@ -898,7 +898,7 @@ def main():
         maturity_dt=maturity_date,
         coupon=straight_bond_coupon,
         freq_type=FrequencyTypes.ANNUAL,
-        dc_type=DayCountTypes.THIRTY_E_360,
+        accrual_dc_type=DayCountTypes.THIRTY_E_360,
     )
 
     print("Problem Parameters:")
@@ -909,7 +909,7 @@ def main():
 
     csv_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "sofr_2020_2025.csv",
+        "us_market_rates_2020_2025.csv",
     )
 
     # Short-rate model. The r0/mu/sigma/kappa values passed below are
@@ -964,6 +964,7 @@ def main():
         start_date=datetime.datetime(2024, 1, 1),
         end_date=datetime.datetime(2025, 5, 27),
         model=rate_simulator.model,
+        rate_col="sofr_rate",  # column in the merged us_market_rates file
     )
     print(
         f"Calibrated: kappa={rate_simulator.kappa:.4f}, "

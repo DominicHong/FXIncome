@@ -1,9 +1,11 @@
+import datetime
+import os
+from typing import Any
+import logging
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-from typing import Any
-import logging
 
 # Import FinancePy classes
 from financepy.utils.date import Date
@@ -45,7 +47,8 @@ class CallableBondSensitivityAnalyzer:
             base_straight_bond_ytm: Base straight bond YTM
             base_sigma: Base volatility for rate simulator
             base_kappa: Mean reversion speed for the Vasicek short-rate model,
-                historically calibrated on 5Y treasury yields (see
+                historically calibrated on the 5Y Treasury yield column of
+                us_market_rates_2020_2025.csv (see
                 interest_rate_simulator.load_and_calibrate_from_csv)
             call_protection_years: Years before bond becomes callable
             face_value: Face value of the bond
@@ -101,9 +104,10 @@ class CallableBondSensitivityAnalyzer:
 
         Uses the mean-reverting Vasicek short-rate model. The long-term mean
         ``mu`` is anchored to ``r0`` so the simulated distribution is centred
-        on the equivalent short rate; ``kappa`` (mean-reversion speed) defaults
-        to ``self.base_kappa``, the value historically calibrated on 5Y treasury
-        yields (see interest_rate_simulator.load_and_calibrate_from_csv).
+        on the equivalent short rate;         ``kappa`` (mean-reversion speed) defaults
+        to ``self.base_kappa``, the value historically calibrated on the
+        5Y Treasury yield column of us_market_rates_2020_2025.csv (see
+        interest_rate_simulator.load_and_calibrate_from_csv).
         """
         days = int(time_to_maturity_years * 365.25) + 2
         days_of_year = 365
@@ -611,10 +615,24 @@ def main():
     maturity_date = Date(27, 5, 2030)  # 5 years
     base_coupon_rate = 0.046  # 4.6%
     base_straight_bond_ytm = 0.046  # 4.6%
-    base_sigma = 0.0105  # ~105 bps, calibrated from 5y_treasury_2020_2025.csv
-    # Mean reversion speed for the Vasicek short-rate model.
-    # Calibrated on 5y_treasury_2020_2025.csv (see interest_rate_simulator for details).
-    base_kappa = 1.0
+
+    # Calibrate the Vasicek mean-reversion speed (kappa) and volatility
+    # (sigma) from the 5Y Treasury par yield series in the merged
+    # market-data file (us_market_rates_2020_2025.csv, tsy5y_rate column).
+    csv_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "us_market_rates_2020_2025.csv",
+    )
+    calibrator = InterestRateSimulator(model="vasicek")
+    calibrator.load_and_calibrate_from_csv(
+        csv_path=csv_path,
+        start_date=datetime.datetime(2024, 1, 1),
+        end_date=datetime.datetime(2025, 5, 27),
+        model="vasicek",
+        rate_col="tsy5y_rate",
+    )
+    base_sigma = calibrator.sigma
+    base_kappa = calibrator.kappa
     
     # Create sensitivity analyzer
     analyzer = CallableBondSensitivityAnalyzer(
