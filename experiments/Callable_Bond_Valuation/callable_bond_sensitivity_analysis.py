@@ -47,7 +47,7 @@ class CallableBondSensitivityAnalyzer:
             base_straight_bond_ytm: Base straight bond YTM
             base_sigma: Base volatility for rate simulator
             base_kappa: Mean reversion speed for the Vasicek short-rate model,
-                historically calibrated on the 5Y Treasury yield column of
+                historically calibrated on the SOFR overnight-rate column of
                 us_market_rates_2020_2025.csv (see
                 interest_rate_simulator.load_and_calibrate_from_csv)
             call_protection_years: Years before bond becomes callable
@@ -104,9 +104,9 @@ class CallableBondSensitivityAnalyzer:
 
         Uses the mean-reverting Vasicek short-rate model. The long-term mean
         ``mu`` is anchored to ``r0`` so the simulated distribution is centred
-        on the equivalent short rate;         ``kappa`` (mean-reversion speed) defaults
+        on the equivalent short rate; ``kappa`` (mean-reversion speed) defaults
         to ``self.base_kappa``, the value historically calibrated on the
-        5Y Treasury yield column of us_market_rates_2020_2025.csv (see
+        SOFR overnight-rate column of us_market_rates_2020_2025.csv (see
         interest_rate_simulator.load_and_calibrate_from_csv).
         """
         days = int(time_to_maturity_years * 365.25) + 2
@@ -617,8 +617,8 @@ def main():
     base_straight_bond_ytm = 0.046  # 4.6%
 
     # Calibrate the Vasicek mean-reversion speed (kappa) and volatility
-    # (sigma) from the 5Y Treasury par yield series in the merged
-    # market-data file (us_market_rates_2020_2025.csv, tsy5y_rate column).
+    # (sigma) from the SOFR overnight-rate series in the merged
+    # market-data file (us_market_rates_2020_2025.csv, sofr_rate column).
     csv_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "us_market_rates_2020_2025.csv",
@@ -626,10 +626,10 @@ def main():
     calibrator = InterestRateSimulator(model="vasicek")
     calibrator.load_and_calibrate_from_csv(
         csv_path=csv_path,
-        start_date=datetime.datetime(2024, 1, 1),
+        start_date=datetime.datetime(2020, 1, 1),
         end_date=datetime.datetime(2025, 5, 27),
         model="vasicek",
-        rate_col="tsy5y_rate",
+        rate_col="sofr_rate",
     )
     base_sigma = calibrator.sigma
     base_kappa = calibrator.kappa

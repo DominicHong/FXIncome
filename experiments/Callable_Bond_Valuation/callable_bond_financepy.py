@@ -9,11 +9,21 @@ Black-Derman-Toy (BDTTree).
 The scenario matches callable_bond_valuer.py:
   * 10y bond issued 27-May-2025, 4.6% annual coupon, 30E/360
   * 1 year call protection, then annual call dates at par (100)
+  * hypothetical issuer whose straight bond trades at par
 
-The discount curve is a flat zero curve at ln(1 + ytm) so the straight
-bond prices at exactly par, making the tree result directly comparable
-with the Longstaff-Schwartz Monte Carlo value from callable_bond_valuer.py
-(whose straight-bond reference is also par).
+Market data (us_market_rates_2020_2025.csv):
+  * SOFR overnight plus on-the-run Treasury par yields (tsy1y/3y/5y/7y/10y)
+
+The primary discount curve is the market curve built by market_curve.py:
+  * Treasury zero curve bootstrapped from the par yields (par-yield
+    assumption: semiannual coupon = yield, price = 100)
+  * shifted by a constant issuer Z-spread calibrated so the straight
+    bond prices at exactly 100
+
+A flat curve at ln(1 + ytm) is retained as a comparison baseline. The
+Longstaff-Schwartz Monte Carlo cross-check from callable_bond_valuer.py
+uses the market-curve anchoring (r0 = SOFR + spread, theta = 10y
+Treasury par + spread).
 """
 
 import datetime
@@ -23,6 +33,7 @@ import matplotlib
 matplotlib.use("Agg")  # no blocking plt.show() from the MC solver's plots
 
 import numpy as np
+import pandas as pd
 from scipy import optimize
 
 from financepy.products.bonds.bond import Bond, YTMCalcType
@@ -30,12 +41,20 @@ from financepy.products.bonds.bond_embedded_option import BondEmbeddedOption
 from financepy.utils.date import Date
 from financepy.utils.day_count import DayCountTypes
 from financepy.utils.frequency import FrequencyTypes
+from financepy.market.curves.discount_curve import DiscountCurve
 from financepy.market.curves.flat_discount_curve import FlatDiscountCurve
 from financepy.models.hw_tree import HWTree
 from financepy.models.bk_tree import BKTree
 from financepy.models.bdt_tree import BDTTree
 
 from interest_rate_simulator import InterestRateSimulator
+from market_curve import (
+    MarketCurveBuilder,
+    bond_pv_with_spread,
+    build_risky_curve,
+    calibrate_spread_to_bond,
+    load_market_rates,
+)
 from callable_bond_valuer import (
     CallableBond,
     CallableBondValuer,
@@ -65,7 +84,7 @@ def build_call_schedule(
 def value_with_financepy(
     beo: BondEmbeddedOption,
     valuation_dt: Date,
-    discount_curve: FlatDiscountCurve,
+    discount_curve: DiscountCurve,
     model,
 ) -> tuple[float, float, float]:
     """Value the callable bond with the given tree model.
@@ -81,7 +100,7 @@ def value_with_financepy(
 def solve_callable_bond_coupon_financepy(
     issue_date: Date,
     maturity_date: Date,
-    discount_curve: FlatDiscountCurve,
+    discount_curve: DiscountCurve,
     call_protection_years: int,
     call_price: float,
     model_factory,
@@ -189,11 +208,9 @@ def main():
     print()
 
     # ------------------------------------------------------------------
-    # 2. Calibrate sigma/kappa from SOFR history (P-measure, as in the
-    #    existing Monte Carlo pipeline). sigma/kappa feed the tree models.
-    #    The merged us_market_rates file also carries the Treasury par
-    #    curve (tsy3y/tsy7y/tsy10y_rate) that could be used to build a
-    #    market discount curve instead of the flat one used below.
+    # 2. Calibrate sigma/kappa from the SOFR overnight-rate history
+    #    (P-measure, as in the Monte Carlo pipeline). sigma/kappa feed
+    #    the tree models.
     # ------------------------------------------------------------------
     csv_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -211,12 +228,19 @@ def main():
         kappa=1.0,
     )
 
-    print(f"Calibrating rate model to historical SOFR "
+    # Calibrate on the SOFR OVERNIGHT rate, not on a Treasury yield series.
+    # The tree models need short-rate vol/mean-reversion; fitting the
+    # Vasicek OLS to a long-maturity yield series overestimates the
+    # mean-reversion speed relative to the short rate, which damps the
+    # tree's long-rate volatility and prices the call at near zero.
+    calib_start = datetime.datetime(2020, 1, 1)
+    calib_end = datetime.datetime(2025, 5, 27)
+    print(f"Calibrating rate model to historical SOFR overnight rates "
           f"({rate_simulator.model})...")
     rate_simulator.load_and_calibrate_from_csv(
         csv_path=csv_path,
-        start_date=datetime.datetime(2024, 1, 1),
-        end_date=datetime.datetime(2025, 5, 27),
+        start_date=calib_start,
+        end_date=calib_end,
         model=rate_simulator.model,
         rate_col="sofr_rate",  # column in the merged us_market_rates file
     )
@@ -228,13 +252,55 @@ def main():
     sigma = rate_simulator.sigma
     kappa = rate_simulator.kappa
 
+    # Vol sanity check: the tree prices the embedded call off the
+    # model-implied long-rate vol sigma*(1-exp(-k*T))/(k*T). Compare it
+    # with the historical par-yield vol of a matching tenor over the
+    # same window - a gross mismatch means kappa/sigma are not fit for
+    # purpose and the option values below are meaningless.
+    hist_df = pd.read_csv(csv_path, parse_dates=["date"])
+    calib_df = hist_df[
+        (hist_df["date"] >= calib_start) & (hist_df["date"] <= calib_end)
+    ]
+    market_10y_vol = calib_df["tsy10y_rate"].diff().std() * np.sqrt(252)
+    T_check = 10.0
+    implied_10y_vol = (
+        sigma * (1.0 - np.exp(-kappa * T_check)) / (kappa * T_check)
+        if kappa > 1e-12
+        else sigma
+    )
+    print("Vol sanity check (10y horizon):")
+    print(f"  Model-implied 10y zero-rate vol: {implied_10y_vol:.4%}")
+    print(f"  Historical 10y par-yield vol:     {market_10y_vol:.4%}\n")
+
     # ------------------------------------------------------------------
-    # 3. Discount curve - flat zero curve at ln(1 + ytm). A coupon bond
-    #    priced at par when coupon == yield prices at exactly 100 under
-    #    this curve, matching the straight-bond reference (100) used by
-    #    the Monte Carlo valuer.
+    # 3. Market discount curve (primary): Treasury zero curve bootstrapped
+    #    from the on-the-run par yields at the issue date, shifted by the
+    #    issuer Z-spread calibrated so the straight bond prices at 100.
+    #    The flat curve at ln(1 + ytm) is kept as a comparison baseline.
     # ------------------------------------------------------------------
-    discount_curve = FlatDiscountCurve(issue_date, np.log(1.0 + straight_bond_ytm))
+    straight_bond = Bond(
+        issue_dt=issue_date,
+        maturity_dt=maturity_date,
+        coupon=straight_bond_coupon,
+        freq_type=FrequencyTypes.ANNUAL,
+        accrual_dc_type=DayCountTypes.THIRTY_E_360,
+    )
+
+    market_rates = load_market_rates(csv_path, issue_date)
+    builder = MarketCurveBuilder(issue_date, market_rates["par_yields"])
+    builder.print_summary()
+
+    spread, straight_at_spread = calibrate_spread_to_bond(
+        builder, straight_bond, target_price=100.0
+    )
+    discount_curve = build_risky_curve(builder, spread)
+    straight_on_treasury = bond_pv_with_spread(builder, straight_bond, 0.0)
+    print(f"\nIssuer Z-spread: {spread:.4%}")
+    print(f"Straight bond PV on Treasury curve: {straight_on_treasury:.4f}")
+    print(f"Straight bond PV at spread:         {straight_at_spread:.4f} "
+          f"(target 100)")
+
+    flat_curve = FlatDiscountCurve(issue_date, np.log(1.0 + straight_bond_ytm))
 
     # ------------------------------------------------------------------
     # 4. Build the BondEmbeddedOption
@@ -260,21 +326,32 @@ def main():
     # ------------------------------------------------------------------
     # 5. Value with each tree model and check convergence in time steps
     #
-    #    NB: FinancePy's BKTree returns option values far below HWTree /
-    #    BDTTree with these parameters (and falling as steps increase),
-    #    which is consistent with a drift-fitting quirk in the BK tree
-    #    implementation. HW and BDT converge cleanly. The HW tree is the
-    #    natural primary model here: it is the Gaussian short-rate model
-    #    whose a (mean reversion) and sigma map directly onto the Vasicek
-    #    parameters calibrated from SOFR history.
+    #    Primary: the market curve (Treasury bootstrap + issuer spread).
+    #    Baseline: the flat curve at ln(1 + ytm).
+    #
+    # Vol unit conventions:
+    #   * HWTree: dr = (theta - a*r)*dt + sigma*dW  -> ABSOLUTE short-rate
+    #     vol; the Vasicek sigma calibrated above maps directly onto it.
+    #   * BKTree/BDTTree: d(ln r) = (theta - a*ln r)*dt + sigma*dW  ->
+    #     PROPORTIONAL short-rate vol, so the calibrated absolute sigma
+    #     must be rescaled by the current short-rate level (sigma / r0).
+    # With the correct units all three trees agree on a meaningful
+    # option value and converge cleanly in the number of steps. The HW
+    # tree is the natural primary model here: it is the Gaussian
+    # short-rate model whose a (mean reversion) and sigma map directly
+    # onto the Vasicek parameters calibrated from SOFR history.
     # ------------------------------------------------------------------
+    sofr0 = market_rates["sofr"]
+    sigma_log = sigma / sofr0
+    print(f"Proportional vol for lognormal trees (sigma/SOFR): {sigma_log:.4f}\n")
+
     models = {
         "HW (Vasicek-equivalent)": lambda n: HWTree(sigma, kappa, n),
-        "BK (Black-Karasinski)": lambda n: BKTree(sigma, kappa, n),
-        "BDT (Black-Derman-Toy)": lambda n: BDTTree(sigma, n),
+        "BK (Black-Karasinski)": lambda n: BKTree(sigma_log, kappa, n),
+        "BDT (Black-Derman-Toy)": lambda n: BDTTree(sigma_log, n),
     }
 
-    print("=== FinancePy Tree Valuation ===")
+    print("\n=== FinancePy Tree Valuation (market curve) ===")
     print(f"{'Model':<26}{'Steps':>6}{'Callable':>10}{'Straight':>10}"
           f"{'Option':>10}")
     print("-" * 62)
@@ -290,22 +367,46 @@ def main():
             print(f"{name:<26}{steps:>6}{v_with:>10.4f}{v_pure:>10.4f}"
                   f"{v_opt:>10.4f}")
 
+    # NB: HW's long-rate volatility is damped by mean reversion
+    # (roughly 1/kappa), so the option value is very sensitive to kappa.
+    print("\nKappa (mean reversion) sensitivity - HWTree, 400 steps:")
+    print(f"{'kappa':>8}{'Callable':>10}{'Option':>10}")
+    for k_test in (0.1, 1.0, 3.0, kappa):
+        v_with, v_pure, v_opt = value_with_financepy(
+            beo, issue_date, discount_curve, HWTree(sigma, k_test, 400)
+        )
+        note = " (calibrated)" if abs(k_test - kappa) < 1e-6 else ""
+        print(f"{k_test:>8.4f}{v_with:>10.4f}{v_opt:>10.4f}{note}")
+
+    print("\n=== FinancePy Tree Valuation (flat baseline) ===")
+    print(f"{'Model':<26}{'Steps':>6}{'Callable':>10}{'Straight':>10}"
+          f"{'Option':>10}")
+    print("-" * 62)
+
+    flat_results = {}
+    for name, factory in models.items():
+        for steps in (100, 200, 400):
+            model = factory(steps)
+            v_with, v_pure, v_opt = value_with_financepy(
+                beo, issue_date, flat_curve, model
+            )
+            flat_results[(name, steps)] = (v_with, v_pure, v_opt)
+            print(f"{name:<26}{steps:>6}{v_with:>10.4f}{v_pure:>10.4f}"
+                  f"{v_opt:>10.4f}")
+
     # ------------------------------------------------------------------
-    # 6. Cross-check against the Longstaff-Schwartz Monte Carlo valuer
+    # 6. Cross-check against the Longstaff-Schwartz Monte Carlo valuer,
+    #    anchored to the market curve (r0 = SOFR + spread, theta = 10y
+    #    Treasury + spread). The straight-bond reference remains 100, the
+    #    same basis as the tree's spread-adjusted curve.
     # ------------------------------------------------------------------
     print("\n=== Cross-check: Longstaff-Schwartz Monte Carlo ===")
-    print("(straight bond reference = dirty price from YTM = par)")
+    print("(market-curve anchoring; straight bond reference = 100)")
 
-    CallableBondValuer.anchor_to_risk_neutral_measure(
+    CallableBondValuer.anchor_to_market_curve(
         rate_simulator=rate_simulator,
-        straight_bond=Bond(
-            issue_dt=issue_date,
-            maturity_dt=maturity_date,
-            coupon=straight_bond_coupon,
-            freq_type=FrequencyTypes.ANNUAL,
-            accrual_dc_type=DayCountTypes.THIRTY_E_360,
-        ),
-        straight_bond_ytm=straight_bond_ytm,
+        straight_bond=straight_bond,
+        csv_path=csv_path,
     )
     print()
 
@@ -334,11 +435,17 @@ def main():
     # 7. Summary
     #
     #    The tree result (HW) is exact backward induction on the Q-measure
-    #    short-rate tree and is the reference value. The LSM Monte Carlo
-    #    value is a low-biased estimator (2000 paths, quadratic regression
-    #    basis), so a gap of ~0.46 in option value is expected.
+    #    short-rate tree fitted to the market curve and is the reference
+    #    value. With short-rate-calibrated vol parameters (and the
+    #    lognormal trees on proportional sigma) the embedded call carries
+    #    meaningful time value, so the callable price sits below the
+    #    straight price at the par coupon.
+    #    The LSM Monte Carlo value is a low-biased estimator with a
+    #    quadratic regression basis and a constant-theta approximation
+    #    to the curve, so its option value can differ from the tree
+    #    price; it is a cross-check, not the reference.
     # ------------------------------------------------------------------
-    print("\n=== Summary ===")
+    print("\n=== Summary (market curve) ===")
     print("FinancePy BondEmbeddedOption (HWTree, 400 steps):")
     v_with, v_pure, v_opt = results[("HW (Vasicek-equivalent)", 400)]
     print(f"  Callable bond value: {v_with:.4f}")
@@ -348,10 +455,12 @@ def main():
 
     # ------------------------------------------------------------------
     # 8. Equivalent coupon: the coupon that makes the callable bond value
-    #    exactly 100, given the same market curve (flat at ln(1.046)).
-    #    Solved with each method: HWTree, BDTTree and LSM Monte Carlo.
+    #    exactly 100, given the market curve. Solved with each method:
+    #    HWTree, BDTTree (tree, market curve) and LSM Monte Carlo
+    #    (market-curve anchoring).
     # ------------------------------------------------------------------
     print("\n=== Solving for Equivalent Callable Bond Coupon (target = 100) ===")
+    print("(market curve: Treasury bootstrap + issuer Z-spread)")
 
     hw_coupon, hw_info = solve_callable_bond_coupon_financepy(
         issue_date=issue_date,
@@ -370,7 +479,7 @@ def main():
         discount_curve=discount_curve,
         call_protection_years=call_protection_years,
         call_price=call_price,
-        model_factory=lambda n: BDTTree(sigma, n),
+        model_factory=lambda n: BDTTree(sigma_log, n),
         num_time_steps=400,
     )
     print(f"BDTTree equivalent coupon: {bdt_coupon:.4%}")
@@ -380,15 +489,11 @@ def main():
     rate_simulator.seed = 42
     mc_coupon, mc_coupon_info = solve_callable_bond_coupon(
         rate_simulator=rate_simulator,
-        straight_bond=Bond(
-            issue_dt=issue_date,
-            maturity_dt=maturity_date,
-            coupon=straight_bond_coupon,
-            freq_type=FrequencyTypes.ANNUAL,
-            accrual_dc_type=DayCountTypes.THIRTY_E_360,
-        ),
+        straight_bond=straight_bond,
         straight_bond_ytm=straight_bond_ytm,
         call_protection_years=call_protection_years,
+        anchor_mode="market_curve",
+        csv_path=csv_path,
     )
     print(f"LSM MC   equivalent coupon: {mc_coupon:.4%}")
 

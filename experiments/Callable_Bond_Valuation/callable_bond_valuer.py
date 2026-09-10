@@ -409,6 +409,86 @@ class CallableBondValuer:
 
         return equivalent_rate, calib_info
 
+    @classmethod
+    def anchor_to_market_curve(
+        cls,
+        rate_simulator: InterestRateSimulator,
+        straight_bond: Bond,
+        csv_path: str | None = None,
+    ) -> tuple[float, dict]:
+        """Anchor the simulator to the market: r0 = SOFR + Z-spread,
+        theta = 10y Treasury par yield + Z-spread.
+
+        The Treasury zero curve is bootstrapped from the on-the-run par
+        yields (tsy1y/3y/5y/7y/10y_rate) in the merged market-data CSV,
+        and the issuer's constant Z-spread is calibrated so that the
+        straight bond prices at 100 (its observed issue price).
+        kappa/sigma remain the historical
+        P-measure estimates (measure-invariance assumption), exactly as
+        in anchor_to_risk_neutral_measure().
+
+        Args:
+            rate_simulator: Simulator whose kappa/sigma have already been
+                calibrated. r0 (and mu, for mean-reverting models) is
+                overwritten in place.
+            straight_bond: FinancePy Bond used to calibrate the Z-spread.
+            csv_path: Path to us_market_rates_2020_2025.csv. Defaults to
+                the file next to this module.
+
+        Returns:
+            Tuple of (spread, anchoring_info).
+        """
+        from market_curve import (
+            MarketCurveBuilder,
+            calibrate_spread_to_bond,
+            load_market_rates,
+        )
+
+        if csv_path is None:
+            csv_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "us_market_rates_2020_2025.csv",
+            )
+
+        valuation_dt = straight_bond.issue_dt
+
+        rates = load_market_rates(csv_path, valuation_dt)
+        builder = MarketCurveBuilder(valuation_dt, rates["par_yields"])
+        spread, price_at_spread = calibrate_spread_to_bond(
+            builder, straight_bond, target_price=100.0
+        )
+
+        r0 = rates["sofr"] + spread
+        theta = rates["par_yields"][10.0] + spread
+
+        rate_simulator.r0 = r0
+        if rate_simulator.model in ("vasicek", "cir"):
+            rate_simulator.mu = theta
+            print(
+                f"Market-curve anchoring: r0 = SOFR + spread = {r0:.4%}, "
+                f"theta = 10y par + spread = {theta:.4%}"
+            )
+        else:
+            print(
+                f"Market-curve anchoring: r0 = SOFR + spread = {r0:.4%} "
+                f"(mu kept from P-measure)"
+            )
+        print(
+            f"  SOFR = {rates['sofr']:.4%} (as of {rates['as_of'].date()}), "
+            f"Z-spread = {spread:.4%}, straight PV at spread = "
+            f"{price_at_spread:.4f}"
+        )
+
+        anchoring_info = {
+            "spread": spread,
+            "r0": r0,
+            "theta": theta,
+            "sofr": rates["sofr"],
+            "par_yields": rates["par_yields"],
+            "straight_pv_at_spread": price_at_spread,
+        }
+        return spread, anchoring_info
+
     def value_bond(
         self,
         valuation_date: Date,
@@ -419,12 +499,11 @@ class CallableBondValuer:
     ) -> tuple[float, float, dict]:
         """Value the callable bond using Longstaff-Schwartz Monte Carlo.
 
-        Replaces the previous per-path "perfect foresight" approach. The LSM
-        algorithm estimates the conditional continuation value at each call date
-        via least squares regression across paths (using only the in-the-money
-        samples), then back-propagates the optimal exercise policy. This removes
-        the look-ahead bias inherent in the old method and produces a (low-biased)
-        estimate of the Bermudan callable price.
+        The LSM algorithm estimates the conditional continuation value at
+        each call date via least squares regression across paths (using
+        only the in-the-money samples), then back-propagates the optimal
+        exercise policy. This avoids look-ahead bias and produces a
+        (low-biased) estimate of the Bermudan callable price.
 
         Args:
             valuation_date: Date to value the bond
@@ -680,12 +759,24 @@ def solve_callable_bond_coupon(
     straight_bond_ytm: float,
     call_protection_years: int = 1,
     tolerance: float = 1e-4,
+    anchor_mode: str = "equivalent_rate",
+    csv_path: str | None = None,
 ) -> tuple[float, dict]:
     """Solve for the coupon rate that makes callable bond value equal to 100.
 
-    The rate simulator's r0 and mu (theta) are re-anchored to the
-    equivalent short rate via anchor_to_risk_neutral_measure() before
-    the optimisation begins.
+    Before the optimisation the rate simulator is re-anchored for
+    risk-neutral pricing. Two anchoring modes are supported:
+
+      * "equivalent_rate": r0 and theta (mu) are both set to the flat
+        rate reproducing the straight-bond PV at straight_bond_ytm
+        (the flat-curve calibration).
+      * "market_curve": r0 = SOFR + issuer Z-spread, theta = 10y
+        Treasury par yield + Z-spread, where the Treasury zero curve is
+        bootstrapped from the par yields in the merged market-data CSV
+        and the spread is calibrated so the straight bond prices at 100.
+
+    kappa/sigma are kept from the historical P-measure calibration in
+    both modes.
 
     Args:
         rate_simulator: InterestRateSimulator instance for Monte Carlo simulation
@@ -693,21 +784,33 @@ def solve_callable_bond_coupon(
         straight_bond_ytm: Fair ytm for straight bond
         call_protection_years: Years of call protection
         tolerance: Convergence tolerance
+        anchor_mode: "equivalent_rate" or "market_curve"
+        csv_path: Path to us_market_rates_2020_2025.csv (market_curve mode)
 
     Returns:
         Tuple of (optimal_coupon_rate, solution_info)
     """
     target_value = 100.0
 
-    # Re-anchor the simulator from P-measure to Q-measure: r0 and theta (mu)
-    # are both set to the equivalent short rate (the flat rate reproducing
-    # today's straight-bond PV). kappa/sigma are kept from the historical
-    # P-measure calibration.
-    CallableBondValuer.anchor_to_risk_neutral_measure(
-        rate_simulator=rate_simulator,
-        straight_bond=straight_bond,
-        straight_bond_ytm=straight_bond_ytm,
-    )
+    # Re-anchor the simulator from P-measure to Q-measure. See the
+    # docstring above for the two supported anchoring schemes.
+    if anchor_mode == "equivalent_rate":
+        CallableBondValuer.anchor_to_risk_neutral_measure(
+            rate_simulator=rate_simulator,
+            straight_bond=straight_bond,
+            straight_bond_ytm=straight_bond_ytm,
+        )
+    elif anchor_mode == "market_curve":
+        CallableBondValuer.anchor_to_market_curve(
+            rate_simulator=rate_simulator,
+            straight_bond=straight_bond,
+            csv_path=csv_path,
+        )
+    else:
+        raise ValueError(
+            f"Unknown anchor_mode '{anchor_mode}'. "
+            "Use 'equivalent_rate' or 'market_curve'."
+        )
 
     def objective_function(coupon_rate: float) -> float:
         """Objective function: difference between callable bond value and target."""
@@ -811,8 +914,14 @@ def analyze_callable_bond_dynamics(
     call_protection_years: int = 1,
     num_simulations: int | None = None,
     coupon_range: list[float] = None,
+    anchor_mode: str = "equivalent_rate",
+    csv_path: str | None = None,
 ) -> None:
-    """Analyze the relationship between coupon rates and callable bond values."""
+    """Analyze the relationship between coupon rates and callable bond values.
+
+    anchor_mode/csv_path select the Q-measure anchoring, as documented in
+    solve_callable_bond_coupon().
+    """
 
     if coupon_range is None:
         coupon_range = [
@@ -834,16 +943,25 @@ def analyze_callable_bond_dynamics(
             0.08,
         ]
 
-    # Re-anchor the simulator from P-measure to Q-measure: r0 and theta (mu)
-    # are both set to the equivalent short rate (the flat rate reproducing
-    # today's straight-bond PV). kappa/sigma are kept from the historical
-    # P-measure calibration.
+    # Re-anchor the simulator from P-measure to Q-measure.
     print()
-    CallableBondValuer.anchor_to_risk_neutral_measure(
-        rate_simulator=rate_simulator,
-        straight_bond=straight_bond,
-        straight_bond_ytm=straight_bond_ytm,
-    )
+    if anchor_mode == "equivalent_rate":
+        CallableBondValuer.anchor_to_risk_neutral_measure(
+            rate_simulator=rate_simulator,
+            straight_bond=straight_bond,
+            straight_bond_ytm=straight_bond_ytm,
+        )
+    elif anchor_mode == "market_curve":
+        CallableBondValuer.anchor_to_market_curve(
+            rate_simulator=rate_simulator,
+            straight_bond=straight_bond,
+            csv_path=csv_path,
+        )
+    else:
+        raise ValueError(
+            f"Unknown anchor_mode '{anchor_mode}'. "
+            "Use 'equivalent_rate' or 'market_curve'."
+        )
     print()
 
     print("=== Callable Bond Dynamics Analysis ===")
@@ -882,7 +1000,7 @@ def analyze_callable_bond_dynamics(
 
 
 def main():
-    # Test the implementation with the specific scenario
+    # Run the sample scenario
     print("=== Callable Bond Valuer Implementation Test ===\n")
     issue_date = Date(27, 5, 2025)
     maturity_date = Date(27, 5, 2035)  # 10 years
@@ -919,21 +1037,27 @@ def main():
     #             so the simulator can be constructed).
     #
     #   Layer 2 - P-measure historical calibration: load_and_calibrate_from_csv()
-    #             runs MLE on the SOFR series and overwrites kappa, sigma AND
-    #             mu (mu is stored as `theta` in InterestRateSimulator). r0 is
-    #             left at its placeholder. These are real-world (P) parameters.
+    #             runs OLS on the SOFR overnight-rate series (sofr_rate
+    #             column of us_market_rates_2020_2025.csv) and overwrites
+    #             kappa, sigma AND mu (mu is stored as `theta` in
+    #             InterestRateSimulator). r0 is left at its placeholder.
+    #             These are real-world (P) parameters.
     #
     #   Layer 3 - Q-measure re-anchoring: inside solve_callable_bond_coupon() /
     #             analyze_callable_bond_dynamics(), via
-    #             CallableBondValuer.anchor_to_risk_neutral_measure(), the
-    #             simulator is re-anchored for risk-neutral pricing:
-    #               r0 & mu := equivalent short rate - the flat rate that
-    #                     reproduces today's straight-bond PV in the MC
-    #                     discounting framework. For mean-reverting models
-    #                     both r0 and theta (mu) are set to this rate, so the
-    #                     rate starts at its long-term mean and the straight
-    #                     bond PV under the MC simulation approximately matches
-    #                     the analytical PV the calibration targets.
+    #             CallableBondValuer.anchor_to_market_curve() with
+    #             anchor_mode="market_curve":
+    #               * The Treasury zero curve is bootstrapped from the
+    #                 on-the-run par yields (tsy1y/3y/5y/7y/10y) at the
+    #                 issue date.
+    #               * The issuer Z-spread is calibrated so the straight
+    #                 bond prices at 100 (its observed issue price).
+    #               * r0 := SOFR + spread, theta (mu) := 10y Treasury par
+    #                 yield + spread.
+    #             The alternative anchor_mode="equivalent_rate" keeps the
+    #             flat-curve anchoring (r0 & theta := the flat
+    #             rate reproducing the straight-bond PV at its YTM).
+    #
     #             κ (mean-reversion speed) and σ (volatility) are KEPT from
     #             Layer 2 under the MEASURE-INVARIANCE ASSUMPTION: under a
     #             Girsanov change of measure from P to Q, σ (the diffusion
@@ -941,12 +1065,13 @@ def main():
     #             is unaffected by the market price of risk — that premium is
     #             absorbed entirely into θ.
     #
-    #             CAVEAT: σ and κ are P-measure estimates from the SOFR time
-    #             series, NOT market-implied Q-measure estimates. For
-    #             production pricing they should ideally be calibrated to
-    #             liquid swaption or bond-option prices (which directly
-    #             reflect the Q measure). The historical estimates here are a
-    #             practical fallback when implied data is unavailable.
+    #             CAVEAT: σ and κ are P-measure estimates from the SOFR
+    #             overnight time series, NOT market-implied Q-measure
+    #             estimates. For production pricing they should ideally be
+    #             calibrated to liquid swaption or bond-option prices (which
+    #             directly reflect the Q measure). The historical estimates
+    #             here are a practical fallback when implied data is
+    #             unavailable.
     rate_simulator = InterestRateSimulator(
         r0=0.044951,              # placeholder -> Layer 3 overwrites with equivalent_rate
         mu=0.044951,              # placeholder -> Layer 2 (P-theta) -> Layer 3 (Q-theta)
@@ -958,10 +1083,13 @@ def main():
         kappa=1.0,                # placeholder -> Layer 2 (P-kappa, kept in Layer 3)
     )
 
-    print(f"Calibrating rate model to historical SOFR ({rate_simulator.model})...")
+    print(
+        f"Calibrating rate model to historical SOFR overnight rates "
+        f"({rate_simulator.model})..."
+    )
     rate_simulator.load_and_calibrate_from_csv(
         csv_path=csv_path,
-        start_date=datetime.datetime(2024, 1, 1),
+        start_date=datetime.datetime(2020, 1, 1),
         end_date=datetime.datetime(2025, 5, 27),
         model=rate_simulator.model,
         rate_col="sofr_rate",  # column in the merged us_market_rates file
@@ -977,6 +1105,8 @@ def main():
         straight_bond=straight_bond,
         straight_bond_ytm=straight_bond_ytm,
         call_protection_years=1,
+        anchor_mode="market_curve",
+        csv_path=csv_path,
     )
 
     # Solve for callable bond coupon using Monte Carlo optimization
@@ -987,6 +1117,8 @@ def main():
         straight_bond=straight_bond,
         straight_bond_ytm=straight_bond_ytm,
         call_protection_years=1,
+        anchor_mode="market_curve",
+        csv_path=csv_path,
     )
 
     print("\nSolution Results:")
